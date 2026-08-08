@@ -19,11 +19,14 @@ DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 OLLAMA_BASE_URL = "http://localhost:11434"
 
+# Starting points only -- COVENANT_MODEL_SMALL / COVENANT_MODEL_COMPLEX in .env override any of
+# them, so choosing a model never means editing this file. The pairs below are what each provider
+# should be run with absent a reason to differ; see .env.example for the alternatives.
 _MODEL_BY_BACKEND_AND_SIZE = {
     # Flash both ways on purpose: every Gemini Pro model reports `limit: 0` on the free tier,
     # so the choice is between Flash generations, not between Flash and Pro.
     ("gemini", "small"): "gemini-2.5-flash",
-    ("gemini", "complex"): "gemini-3.6-flash",
+    ("gemini", "complex"): "gemini-3.5-flash",
     ("anthropic", "small"): "claude-haiku-4-5-20251001",
     ("anthropic", "complex"): "claude-sonnet-5",
     ("huggingface", "small"): "Qwen/Qwen3-8B:nscale",
@@ -72,8 +75,20 @@ def _select_backend() -> str:
 
 @dataclass
 class Client:
+    """A tier's model, plus the models to fall through to when its quota runs out.
+
+    Free tiers meter each model separately -- Gemini allows on the order of twenty requests per
+    model per day -- so no single model can carry a run of a hundred-odd calls, while several
+    together can. `model` stays fixed no matter which alternate actually served a call, because the
+    caches are keyed by it: rotating the recorded name would make finished work look unfinished.
+    """
+
     backend: str
     model: str
+    alternates: tuple[str, ...] = ()
+
+    def _models(self) -> list[str]:
+        return [self.model, *self.alternates]
 
     def complete(
         self,
@@ -84,24 +99,29 @@ class Client:
         temperature: float = 0.0,
     ) -> str:
         last_error: Exception | None = None
-        for attempt in range(MAX_RETRIES):
+        models = self._models()
+        active = 0
+        for attempt in range(MAX_RETRIES + len(self.alternates)):
+            serving = models[active]
             try:
                 if self.backend == "anthropic":
-                    return self._complete_anthropic(system, user, max_tokens, temperature)
+                    return self._complete_anthropic(serving, system, user, max_tokens, temperature)
                 if self.backend == "huggingface":
                     return self._complete_openai_compatible(
                         HF_ROUTER_BASE_URL,
                         HF_TOKEN,
+                        serving,
                         system,
                         user,
                         max_tokens,
                         temperature,
-                        extra_body=_hf_extra_body(self.model),
+                        extra_body=_hf_extra_body(serving),
                     )
                 if self.backend == "gemini":
                     return self._complete_openai_compatible(
                         GEMINI_BASE_URL,
                         GEMINI_API_KEY,
+                        serving,
                         system,
                         user,
                         max_tokens,
@@ -111,13 +131,14 @@ class Client:
                     return self._complete_openai_compatible(
                         DASHSCOPE_BASE_URL,
                         ALIBABA_CLOUD_API_KEY,
+                        serving,
                         system,
                         user,
                         max_tokens,
                         temperature,
                         extra_body={"enable_thinking": False},
                     )
-                return self._complete_ollama(system, user, max_tokens, temperature)
+                return self._complete_ollama(serving, system, user, max_tokens, temperature)
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
                 last_error = exc
                 if attempt >= MAX_RETRIES - 1:
@@ -126,6 +147,14 @@ class Client:
                 # off for a couple of seconds just spends another attempt on the same refusal.
                 # Honour Retry-After when the server sends one, otherwise wait out the window.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status == 429 and active < len(models) - 1:
+                    # this model's quota is spent -- another one's is not, so switch instead of
+                    # waiting out a window that will not reopen until tomorrow.
+                    active += 1
+                    print(
+                        f"  quota exhausted on {serving}, switching to {models[active]}", flush=True
+                    )
+                    continue
                 if status == 429:
                     retry_after = exc.response.headers.get("retry-after")
                     delay = (
@@ -180,13 +209,13 @@ class Client:
         ) from last_error
 
     def _complete_anthropic(
-        self, system: str, user: str, max_tokens: int, temperature: float
+        self, model: str, system: str, user: str, max_tokens: int, temperature: float
     ) -> str:
         import anthropic
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model=self.model,
+            model=model,
             max_tokens=max_tokens,
             temperature=temperature,
             system=system,
@@ -198,6 +227,7 @@ class Client:
         self,
         base_url: str,
         api_key: str,
+        model: str,
         system: str,
         user: str,
         max_tokens: int,
@@ -208,7 +238,7 @@ class Client:
         # classification stages; callers that want sampled diversity (spec self-consistency voting)
         # pass a nonzero temperature explicitly.
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -228,13 +258,15 @@ class Client:
         # so callers get a retryable empty string instead of a None that crashes on .strip().
         return response.json()["choices"][0]["message"]["content"] or ""
 
-    def _complete_ollama(self, system: str, user: str, max_tokens: int, temperature: float) -> str:
+    def _complete_ollama(
+        self, model: str, system: str, user: str, max_tokens: int, temperature: float
+    ) -> str:
         # ollama defaults to a 4096-token context and silently truncates the prompt -- a 46KB
         # credit agreement would lose most of its text. Size the window to the actual prompt
         # (~3 chars/token) instead of allocating a fixed 32k KV cache on every small call.
         num_ctx = min(32768, max(8192, (len(system) + len(user)) // 3 + max_tokens + 512))
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -257,5 +289,18 @@ def get_client(size: str = "complex") -> Client:
     """
     backend = _select_backend()
     override = os.environ.get(f"COVENANT_MODEL_{size.upper()}")
-    model = override or _MODEL_BY_BACKEND_AND_SIZE[(backend, size)]
+    if override:
+        # comma-separated: the first is the model of record, the rest are fallen through to as each
+        # one's quota runs out (see Client).
+        names = [n.strip() for n in override.split(",") if n.strip()]
+        return Client(backend=backend, model=names[0], alternates=tuple(names[1:]))
+
+    model = _MODEL_BY_BACKEND_AND_SIZE.get((backend, size))
+    if model is None:
+        known = sorted({b for b, _ in _MODEL_BY_BACKEND_AND_SIZE})
+        raise SystemExit(
+            f"no default model for backend {backend!r} (tier {size!r}).\n"
+            f"set COVENANT_MODEL_{size.upper()} in .env, "
+            f"or use one of the backends with defaults: {', '.join(known)}"
+        )
     return Client(backend=backend, model=model)
