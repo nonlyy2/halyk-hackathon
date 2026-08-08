@@ -89,19 +89,22 @@ def _metric_expr(cov: dict) -> str:
     return formula
 
 
-def _quarter_of(date_str: str, period_start: str | None = None) -> str:
-    """Quarter of the covenant's own period, not of the calendar year.
+def _months(date_str: str) -> int:
+    return int(date_str[5:7]) + 12 * int(date_str[0:4])
 
-    Clauses say "the fourth quarter of the period ending 2025-12-31", so the quarters run from the
-    period's start. They coincide with calendar quarters only while the financial year happens to
-    begin in January."""
-    month = int(date_str[5:7]) + 12 * int(date_str[0:4])
-    first = (
-        month - (int(period_start[5:7]) + 12 * int(period_start[0:4]))
-        if period_start
-        else month - 1
-    )
-    return f"Q{first // 3 + 1}"
+
+def _quarter_of(date_str: str, period_end: str | None = None) -> str:
+    """Quarter of the covenant's own financial year, not of the calendar year.
+
+    Clauses say "the fourth quarter of the period ending 2025-12-31", so the quarters are counted
+    back from the year END: Q4 is its final three months. Anchoring on the year end rather than the
+    stated period start matters because the two are only the same when the period covers the whole
+    year -- a spec that ALSO narrows `period` to the quarter would otherwise put those dates in
+    relative Q1 and the "Q4" test could never match anything."""
+    if not period_end:
+        return f"Q{(int(date_str[5:7]) - 1) // 3 + 1}"
+    offset = _months(period_end) - _months(date_str)  # 0 for the final month of the year
+    return f"Q{4 - offset // 3}" if 0 <= offset < 12 else "Q0"
 
 
 def _period_filtered(enriched: list[EnrichedTxn], cov: dict) -> list[EnrichedTxn]:
@@ -115,7 +118,7 @@ def _period_filtered(enriched: list[EnrichedTxn], cov: dict) -> list[EnrichedTxn
             continue
         if end and e.date > end:
             continue
-        if quarter and _quarter_of(e.date, start) != quarter:
+        if quarter and _quarter_of(e.date, end) != quarter:
             continue
         out.append(e)
     return out

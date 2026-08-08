@@ -175,6 +175,7 @@ def cmd_enrich(args, paths: Paths) -> None:
 
 
 def cmd_spec(args, paths: Paths) -> None:
+    template = json.loads(paths.template.read_text())
     docs = _docs(paths)
     index = DocumentIndex.load(paths.classifications)
     client = get_client("complex")
@@ -194,11 +195,24 @@ def cmd_spec(args, paths: Paths) -> None:
             continue
         enriched, disclosed = loaded
 
+        # The article number comes from the template's own keys ("6.1" -> article 6). Hardcoding it
+        # would cost every cell at once on a set whose covenants sit under a different article, and
+        # the template states it for free.
+        articles = {k.split(".")[0] for k in template["answers"].get(sid, {})} or {"6"}
+        article = sorted(articles)[0]
         text = max(
-            (docs[r.doc_id].text for r in agreements), key=lambda t: len(find_covenant_keys(t))
+            (docs[r.doc_id].text for r in agreements),
+            key=lambda t: len(find_covenant_keys(t, article)),
         )
-        keys = find_covenant_keys(text)
-        clauses = {k: extract_clause_text(text, k, keys) for k in keys}
+        keys = find_covenant_keys(text, article)
+        # answer what the template asks for, even if a heading for it was not located
+        keys = sorted(set(keys) | set(template["answers"].get(sid, {})))
+        clauses = {}
+        for k in keys:
+            try:
+                clauses[k] = extract_clause_text(text, k, keys)
+            except ValueError:
+                continue
         categories = [e.category for e in enriched] + [e.raw_category for e in enriched]
         tags = [
             name

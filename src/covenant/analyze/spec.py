@@ -84,10 +84,14 @@ aggregates, or a doc_figures key. Never invent a composite/derived name here (e.
   - "formula": a plain arithmetic expression (+, -, *, /, min(...), max(...), parentheses only -- \
 no other functions) using ONLY role names, the two built-in tag aggregates, and/or doc_figures \
 names -- the same restriction as "variables" above. If the clause's metric is a composite like \
-EBITDA, write the composite out inline using primitive role names (e.g. \
-"revenue - operating_expenses - payroll - interest_expense" -- not "ebitda"); do not reference any \
-name that isn't independently one of those three kinds. Must evaluate to the metric's actual value \
-(not a boolean).
+EBITDA, write the composite out inline from primitive role names rather than naming it ("ebitda" \
+resolves to nothing). Build that expression from THE CLAUSE'S OWN WORDS and nothing else: where it \
+says EBITDA means "Выручка за вычетом Операционных расходов", the formula is exactly \
+"revenue - operating_expenses" -- subtracting payroll, interest or any other term the clause does \
+not name invents a definition the document never gave, and every term you add that the clause \
+omits makes the reported value wrong. Where the clause itemises what the metric comprises, include \
+exactly those items. Do not reference any name that isn't independently one of those three kinds. \
+Must evaluate to the metric's actual value (not a boolean).
   - "comparison": one of "<=", "<", ">=", ">", "==" -- how the formula's value relates to \
 "threshold" when COMPLIANT.
   - "threshold": the numeric threshold, exactly as stated (no unit symbols).
@@ -153,7 +157,7 @@ def build_spec(
     data = client.complete_json(SPEC_PROMPT, user, max_tokens=8192, temperature=temperature)
     data.setdefault("roles", {})
     data.setdefault("covenants", {})
-    return data
+    return _split_inflows_from_expense_roles(_sanitise_identifiers(data))
 
 
 def build_spec_voted(
@@ -373,7 +377,12 @@ def validate_spec(spec: dict) -> dict[str, list[str]]:
         for expr in filter(None, [cov.get("formula"), cov.get("precondition")]):
             try:
                 names = _extract_names(expr)
-            except ValueError as exc:
+            except (ValueError, SyntaxError) as exc:
+                # SyntaxError as well as ValueError: a formula that is not valid Python at all
+                # ("revenue - (operating") raises SyntaxError out of ast.parse, and catching only
+                # ValueError let it escape validate_spec and abort the entire scenario -- three
+                # cells lost to one malformed string, when the point of this function is to report
+                # exactly that as a per-covenant problem.
                 missing.add(f"(unparseable expression: {exc})")
                 continue
             missing |= names - known
@@ -387,6 +396,52 @@ def save_spec(sid: str, spec: dict, client: Client, cache_dir: Path = CACHE_DIR)
     path = cache_dir / f"{sid}__{_model_tag(client)}.json"
     path.write_text(json.dumps(spec, ensure_ascii=False, indent=2))
     return path
+
+
+_INFLOW_MARKERS = ("_income", "_rebate", "_refund", "_recovery", "_credit", "_received")
+
+
+def _split_inflows_from_expense_roles(spec: dict) -> dict:
+    """Keep an inflow category out of the expense role it mirrors.
+
+    A category named for money coming back -- interest income, an insurance rebate, a tax refund --
+    shares a role with its expense counterpart often enough to matter, and once it does the formula
+    can no longer tell them apart: _resolve_variable sums the role signed, so the inflow quietly
+    cancels part of the very cost the covenant caps. Giving it a role of its own keeps both
+    addressable, and a formula that genuinely wants the net can still name each side.
+    """
+    roles = spec.get("roles") or {}
+    for category, role in list(roles.items()):
+        if role.endswith("_expense") and category.lower().endswith(_INFLOW_MARKERS):
+            roles[category] = f"{category}_role"
+    return spec
+
+
+def _sanitise_identifiers(spec: dict) -> dict:
+    """Rename doc_figures keys that are not valid Python identifiers, in the formulas too.
+
+    Models label a disclosed figure the way the document phrases it -- "Aggregate severance program
+    obligation" -- and drop that phrase straight into the formula. It is several bare names with no
+    operator between them, so the expression will not parse at all and the covenant is lost whole,
+    even though every number needed to compute it is present and correct."""
+    for cov in (spec.get("covenants") or {}).values():
+        figures = cov.get("doc_figures") or {}
+        renames = {
+            key: re.sub(r"\W+", "_", key.strip()).strip("_").lower()
+            for key in figures
+            if not key.isidentifier()
+        }
+        if not renames:
+            continue
+        cov["doc_figures"] = {renames.get(k, k): v for k, v in figures.items()}
+        for field in ("formula", "precondition"):
+            expr = cov.get(field)
+            if not expr:
+                continue
+            for old, new_name in sorted(renames.items(), key=lambda kv: -len(kv[0])):
+                expr = expr.replace(old, new_name)
+            cov[field] = expr
+    return spec
 
 
 RESERVED_AGGREGATES = ("related_party_payments", "unrestricted_sub_transfers")
@@ -410,4 +465,6 @@ def load_spec(sid: str, client: Client, cache_dir: Path = CACHE_DIR) -> dict | N
     path = cache_dir / f"{sid}__{_model_tag(client)}.json"
     if not path.exists():
         return None
-    return _unshadow_reserved_roles(json.loads(path.read_text()))
+    return _unshadow_reserved_roles(
+        _split_inflows_from_expense_roles(_sanitise_identifiers(json.loads(path.read_text())))
+    )

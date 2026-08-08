@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 
@@ -14,7 +15,12 @@ ALIBABA_CLOUD_API_KEY = os.environ.get("ALIBABA_CLOUD_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
-DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+# A dedicated Alibaba workspace gets its own host, so the endpoint has to be configurable rather
+# than fixed to the shared one. COVENANT_BASE_URL overrides whichever backend is selected, which
+# also covers any other OpenAI-compatible gateway.
+DASHSCOPE_BASE_URL = os.environ.get(
+    "ALIBABA_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+).rstrip("/")
 # Gemini speaks the OpenAI protocol on this path, so it needs no transport of its own.
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -43,6 +49,11 @@ _MODEL_BY_BACKEND_AND_SIZE = {
 }
 
 MAX_RETRIES = 4
+# Seconds to leave between requests. Free tiers meter per minute, and reacting to a 429 after the
+# fact is not enough: the stages fire several calls back to back, blow the window, and then spend
+# the whole retry budget waiting for it to reopen. Pacing the requests avoids the refusal instead.
+MIN_REQUEST_INTERVAL = float(os.environ.get("COVENANT_MIN_INTERVAL", "0"))
+_last_request_at = 0.0
 DEFAULT_MAX_TOKENS = 4096
 
 
@@ -90,6 +101,20 @@ class Client:
     def _models(self) -> list[str]:
         return [self.model, *self.alternates]
 
+    def _pace(self) -> None:
+        # Only metered providers need this. A local Ollama has no quota, so spacing its calls out
+        # would be pure waiting -- and this pipeline makes over a hundred of them.
+        global _last_request_at
+        if self.backend == "ollama" or MIN_REQUEST_INTERVAL <= 0:
+            return
+        wait = _last_request_at + MIN_REQUEST_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.monotonic()
+
+    def _base_url(self, default: str) -> str:
+        return (os.environ.get("COVENANT_BASE_URL") or default).rstrip("/")
+
     def complete(
         self,
         system: str,
@@ -103,12 +128,13 @@ class Client:
         active = 0
         for attempt in range(MAX_RETRIES + len(self.alternates)):
             serving = models[active]
+            self._pace()
             try:
                 if self.backend == "anthropic":
                     return self._complete_anthropic(serving, system, user, max_tokens, temperature)
                 if self.backend == "huggingface":
                     return self._complete_openai_compatible(
-                        HF_ROUTER_BASE_URL,
+                        self._base_url(HF_ROUTER_BASE_URL),
                         HF_TOKEN,
                         serving,
                         system,
@@ -119,7 +145,7 @@ class Client:
                     )
                 if self.backend == "gemini":
                     return self._complete_openai_compatible(
-                        GEMINI_BASE_URL,
+                        self._base_url(GEMINI_BASE_URL),
                         GEMINI_API_KEY,
                         serving,
                         system,
@@ -129,7 +155,7 @@ class Client:
                     )
                 if self.backend == "alibaba":
                     return self._complete_openai_compatible(
-                        DASHSCOPE_BASE_URL,
+                        self._base_url(DASHSCOPE_BASE_URL),
                         ALIBABA_CLOUD_API_KEY,
                         serving,
                         system,
@@ -275,9 +301,35 @@ class Client:
             "think": False,
             "options": {"num_predict": max_tokens, "temperature": temperature, "num_ctx": num_ctx},
         }
-        response = httpx.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=600)
+        response = httpx.post(
+            f"{self._base_url(OLLAMA_BASE_URL)}/api/chat", json=payload, timeout=600
+        )
         response.raise_for_status()
         return response.json()["message"]["content"]
+
+
+_MODEL_NAME_HINTS = {
+    "gemini": ("gemini-", "gemma-"),
+    "anthropic": ("claude-",),
+    "alibaba": ("qwen", "glm-", "deepseek-", "kimi-"),
+}
+
+
+def _warn_if_foreign_model(backend: str, model: str) -> None:
+    """Say something when the chosen model plainly belongs to a different provider.
+
+    Backend and model are configured separately, so changing one and forgetting the other sends,
+    say, a Gemini model name to Alibaba's endpoint -- which answers 404 and surfaces as a bare
+    "LLM call failed after 4 attempts", with nothing pointing at the real cause.
+    """
+    hints = _MODEL_NAME_HINTS.get(backend)
+    owners = [b for b, prefixes in _MODEL_NAME_HINTS.items() if model.lower().startswith(prefixes)]
+    if hints and owners and backend not in owners:
+        print(
+            f"warning: COVENANT_BACKEND={backend} but the model {model!r} looks like "
+            f"{owners[0]}'s -- check .env, this usually means one of the two was changed alone",
+            file=sys.stderr,
+        )
 
 
 def get_client(size: str = "complex") -> Client:
@@ -293,6 +345,7 @@ def get_client(size: str = "complex") -> Client:
         # comma-separated: the first is the model of record, the rest are fallen through to as each
         # one's quota runs out (see Client).
         names = [n.strip() for n in override.split(",") if n.strip()]
+        _warn_if_foreign_model(backend, names[0])
         return Client(backend=backend, model=names[0], alternates=tuple(names[1:]))
 
     model = _MODEL_BY_BACKEND_AND_SIZE.get((backend, size))
