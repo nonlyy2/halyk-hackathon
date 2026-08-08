@@ -19,11 +19,14 @@ DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 OLLAMA_BASE_URL = "http://localhost:11434"
 
+# Starting points only -- COVENANT_MODEL_SMALL / COVENANT_MODEL_COMPLEX in .env override any of
+# them, so choosing a model never means editing this file. The pairs below are what each provider
+# should be run with absent a reason to differ; see .env.example for the alternatives.
 _MODEL_BY_BACKEND_AND_SIZE = {
     # Flash both ways on purpose: every Gemini Pro model reports `limit: 0` on the free tier,
     # so the choice is between Flash generations, not between Flash and Pro.
     ("gemini", "small"): "gemini-2.5-flash",
-    ("gemini", "complex"): "gemini-3.6-flash",
+    ("gemini", "complex"): "gemini-3.5-flash",
     ("anthropic", "small"): "claude-haiku-4-5-20251001",
     ("anthropic", "complex"): "claude-sonnet-5",
     ("huggingface", "small"): "Qwen/Qwen3-8B:nscale",
@@ -257,5 +260,15 @@ def get_client(size: str = "complex") -> Client:
     """
     backend = _select_backend()
     override = os.environ.get(f"COVENANT_MODEL_{size.upper()}")
-    model = override or _MODEL_BY_BACKEND_AND_SIZE[(backend, size)]
+    if override:
+        return Client(backend=backend, model=override)
+
+    model = _MODEL_BY_BACKEND_AND_SIZE.get((backend, size))
+    if model is None:
+        known = sorted({b for b, _ in _MODEL_BY_BACKEND_AND_SIZE})
+        raise SystemExit(
+            f"no default model for backend {backend!r} (tier {size!r}).\n"
+            f"set COVENANT_MODEL_{size.upper()} in .env, "
+            f"or use one of the backends with defaults: {', '.join(known)}"
+        )
     return Client(backend=backend, model=model)
