@@ -373,7 +373,12 @@ def validate_spec(spec: dict) -> dict[str, list[str]]:
         for expr in filter(None, [cov.get("formula"), cov.get("precondition")]):
             try:
                 names = _extract_names(expr)
-            except ValueError as exc:
+            except (ValueError, SyntaxError) as exc:
+                # SyntaxError as well as ValueError: a formula that is not valid Python at all
+                # ("revenue - (operating") raises SyntaxError out of ast.parse, and catching only
+                # ValueError let it escape validate_spec and abort the entire scenario -- three
+                # cells lost to one malformed string, when the point of this function is to report
+                # exactly that as a per-covenant problem.
                 missing.add(f"(unparseable expression: {exc})")
                 continue
             missing |= names - known

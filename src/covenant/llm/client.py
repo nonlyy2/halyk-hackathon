@@ -14,7 +14,12 @@ ALIBABA_CLOUD_API_KEY = os.environ.get("ALIBABA_CLOUD_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
-DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+# A dedicated Alibaba workspace gets its own host, so the endpoint has to be configurable rather
+# than fixed to the shared one. COVENANT_BASE_URL overrides whichever backend is selected, which
+# also covers any other OpenAI-compatible gateway.
+DASHSCOPE_BASE_URL = os.environ.get(
+    "ALIBABA_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+).rstrip("/")
 # Gemini speaks the OpenAI protocol on this path, so it needs no transport of its own.
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -90,6 +95,9 @@ class Client:
     def _models(self) -> list[str]:
         return [self.model, *self.alternates]
 
+    def _base_url(self, default: str) -> str:
+        return (os.environ.get("COVENANT_BASE_URL") or default).rstrip("/")
+
     def complete(
         self,
         system: str,
@@ -108,7 +116,7 @@ class Client:
                     return self._complete_anthropic(serving, system, user, max_tokens, temperature)
                 if self.backend == "huggingface":
                     return self._complete_openai_compatible(
-                        HF_ROUTER_BASE_URL,
+                        self._base_url(HF_ROUTER_BASE_URL),
                         HF_TOKEN,
                         serving,
                         system,
@@ -119,7 +127,7 @@ class Client:
                     )
                 if self.backend == "gemini":
                     return self._complete_openai_compatible(
-                        GEMINI_BASE_URL,
+                        self._base_url(GEMINI_BASE_URL),
                         GEMINI_API_KEY,
                         serving,
                         system,
@@ -129,7 +137,7 @@ class Client:
                     )
                 if self.backend == "alibaba":
                     return self._complete_openai_compatible(
-                        DASHSCOPE_BASE_URL,
+                        self._base_url(DASHSCOPE_BASE_URL),
                         ALIBABA_CLOUD_API_KEY,
                         serving,
                         system,
@@ -275,7 +283,9 @@ class Client:
             "think": False,
             "options": {"num_predict": max_tokens, "temperature": temperature, "num_ctx": num_ctx},
         }
-        response = httpx.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=600)
+        response = httpx.post(
+            f"{self._base_url(OLLAMA_BASE_URL)}/api/chat", json=payload, timeout=600
+        )
         response.raise_for_status()
         return response.json()["message"]["content"]
 

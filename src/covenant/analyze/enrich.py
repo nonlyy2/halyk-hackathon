@@ -243,12 +243,18 @@ def _supported_by_source(entry: dict, txns: pd.DataFrame, source_text: str) -> b
     row = row.iloc[0]
 
     counterparty = _PAREN_SUFFIX_RE.sub("", str(row["counterparty"])).strip()
-    if counterparty and counterparty not in source_text:
-        return False
     if pd.isna(row["amount"]):
-        return bool(counterparty)  # nothing to match the amount against; the name has to carry it
+        # no amount to match on, so the name has to carry the identification by itself
+        return bool(counterparty) and counterparty in source_text
+
+    # An amount quoted to the cent identifies a transaction on its own -- two rows agreeing to the
+    # penny do not happen by accident. Requiring the counterparty as well used to reject genuine
+    # disclosures whose tables came through OCR with the name mangled ("Ilek" read as "Пек"), while
+    # the hallucinated entries this filter exists for match neither the id nor the amount.
     amount = abs(float(row["amount"]))
-    return any(fmt in source_text for fmt in (f"{amount:,.2f}", f"{amount:.2f}"))
+    if any(fmt in source_text for fmt in (f"{amount:,.2f}", f"{amount:.2f}")):
+        return True
+    return bool(counterparty) and counterparty in source_text
 
 
 def _drop_unsupported(overrides: dict, txns: pd.DataFrame, source_text: str) -> list[str]:
