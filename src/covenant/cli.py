@@ -159,6 +159,7 @@ def cmd_enrich(args, paths: Paths) -> None:
                 "\n\n".join(filter(None, sections)) or None,
                 small,
                 complex_,
+                votes=args.votes,
             )
         except Exception as exc:  # noqa: BLE001 -- one bad scenario must not kill the batch
             print(f"{sid}: ERROR {exc}", flush=True)
@@ -330,6 +331,13 @@ def main(argv: list[str] | None = None) -> None:
         if wants_scenarios:
             sub.add_argument("scenarios", nargs="*")
             sub.add_argument("--fresh", action="store_true", help="ignore the existing cache")
+        if name == "enrich":
+            sub.add_argument(
+                "--votes",
+                type=int,
+                default=1,
+                help="categorise this many times and take the modal category per row",
+            )
         if name == "spec":
             sub.add_argument(
                 "--votes", type=int, default=3, help="self-consistency samples to majority-vote"

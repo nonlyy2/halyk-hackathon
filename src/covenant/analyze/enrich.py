@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -321,7 +322,7 @@ CATEGORIZE_CHUNK = 20  # a whole 55-row ledger in one call is where rows start g
 
 
 def categorize_transactions(
-    txns: pd.DataFrame, client: Client, max_rounds: int = 3
+    txns: pd.DataFrame, client: Client, max_rounds: int = 3, votes: int = 1
 ) -> dict[str, str]:
     """Category per transaction, with every row accounted for.
 
@@ -331,6 +332,18 @@ def categorize_transactions(
     what a covenant measures, which turns one skipped id into a whole lost cell. Smaller batches are
     markedly more reliable, missing ids are re-asked, and anything still missing raises rather than
     being silently mislabelled."""
+    if votes > 1:
+        # Categorisation is where this pipeline's run-to-run variance lives: the same ledger comes
+        # back with a different split of category names each time, the role map moves with it, and a
+        # covenant's terms land on a different set of rows -- about a point either way, measured on
+        # two identical runs. The graded set comes with no key to pick the lucky run with, so the
+        # spread has to be squeezed here rather than chosen away afterwards.
+        ballots: dict[str, list[str]] = {}
+        for _ in range(votes):
+            for txn_id, category in categorize_transactions(txns, client, max_rounds).items():
+                ballots.setdefault(txn_id, []).append(category)
+        return {t: Counter(v).most_common(1)[0][0] for t, v in ballots.items()}
+
     rows = _txn_rows(txns)
     by_id = {r["txn_id"]: r for r in rows}
     out: dict[str, str] = {}
@@ -508,6 +521,7 @@ def enrich_scenario(
     addendum_text: str | None,
     small_client: Client,
     complex_client: Client,
+    votes: int = 1,
 ) -> tuple[list[EnrichedTxn], list[dict]]:
     """Returns (enriched transactions, disclosed_figures not tied to any transaction).
 
@@ -517,7 +531,7 @@ def enrich_scenario(
     unreliable on this dataset's ~55-row scenarios (gateway timeouts), which categorization
     doesn't need the bigger model to avoid anyway.
     """
-    categories = categorize_transactions(txns, small_client)
+    categories = categorize_transactions(txns, small_client, votes=votes)
     kyc = extract_kyc_definitions(ownership_text, complex_client)
     overrides = extract_audit_overrides(addendum_text, txns, complex_client)
 
