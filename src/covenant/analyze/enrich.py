@@ -118,11 +118,13 @@ since the amount itself won't be there to match on).
 - disclosed_figures: any covenant-relevant dollar figure in the addendum that does NOT correspond \
 to any transaction in the list at all (e.g. a provision or liability that was disclosed but never \
 actually transacted, with no txn_id anywhere close). Each: {"label": ..., "amount_usd": <positive>, "reason": ...}.
-  A figure counts here even when the statements do not print it under that name but do print the \
-movement it follows from -- a period's additions to an asset class, for instance, follow from its \
-opening balance, closing balance and the period's depreciation, all of which such a note states. \
-Where that is the case, give the resulting amount and set out in "reason" which stated figures you \
-combined and how, so the derivation can be checked.
+- roll_forwards: where the statements do not print the figure a covenant needs but do print the \
+movement it follows from, transcribe the RAW COMPONENTS and do not combine them yourself. The \
+common case is a period's additions to an asset class, which follow from its opening balance, its \
+closing balance and the period's depreciation. Each: {"label": <what the additions are, e.g. \
+"group capital expenditure">, "opening": <number>, "closing": <number>, "depreciation": <number>, \
+"reason": <the note you read them from>}. Copy the three numbers exactly as printed; the \
+subtraction happens outside this call.
   On units: where a blanket header ("amounts in thousands") disagrees with the full-precision \
 figures a note itself prints, follow the note's own figures -- a number written to the cent is \
 already in units.
@@ -141,7 +143,7 @@ override -- it must not appear in any list above. Only positions the addendum ac
 
 Omit any category entirely if the addendum has nothing for it (empty list is fine). Respond with \
 strict JSON only, no markdown code fences, no commentary:
-{"reclassifications": [...], "cutoff_exclusions": [...], "one_off_addback_candidates": [...], "amount_overrides": [...], "disclosed_figures": [...], "fx_rates": []}
+{"reclassifications": [...], "cutoff_exclusions": [...], "one_off_addback_candidates": [...], "amount_overrides": [...], "disclosed_figures": [...], "fx_rates": [], "roll_forwards": []}
 """
 
 _PAREN_SUFFIX_RE = re.compile(r"\s*\([^)]*\)\s*$")
@@ -381,6 +383,34 @@ def extract_kyc_definitions(ownership_text: str | None, client: Client) -> dict:
     return data
 
 
+def _roll_forward_figures(overrides: dict) -> list[dict]:
+    """Turn transcribed opening/closing/depreciation balances into the additions for the period.
+
+    A covenant can need a figure the statements never print -- a group's capital expenditure, say --
+    while printing every number it follows from. Asked for the answer directly, models return the
+    closing balance and say so in their own reason field; asked for the three components, they copy
+    them correctly. So the arithmetic belongs here, next to the FX conversion, for the same reason.
+    """
+    figures = []
+    for entry in overrides.get("roll_forwards") or []:
+        try:
+            opening = float(entry["opening"])
+            closing = float(entry["closing"])
+            depreciation = abs(float(entry.get("depreciation") or 0.0))
+        except (KeyError, TypeError, ValueError):
+            continue
+        additions = closing - opening + depreciation
+        if additions > 0:
+            figures.append(
+                {
+                    "label": str(entry.get("label") or "roll-forward additions"),
+                    "amount_usd": additions,
+                    "reason": f"derived: closing {closing} - opening {opening} + depreciation {depreciation}",
+                }
+            )
+    return figures
+
+
 def _unclaimed_disclosed_amounts(
     overrides: dict, txns: pd.DataFrame, source_text: str
 ) -> list[str]:
@@ -420,6 +450,7 @@ def extract_audit_overrides(addendum_text: str | None, txns: pd.DataFrame, clien
         "amount_overrides": [],
         "disclosed_figures": [],
         "fx_rates": [],
+        "roll_forwards": [],
     }
     if not addendum_text:
         return empty
@@ -593,7 +624,8 @@ def enrich_scenario(
             )
         )
 
-    return enriched, overrides.get("disclosed_figures", [])
+    disclosed = list(overrides.get("disclosed_figures") or []) + _roll_forward_figures(overrides)
+    return enriched, disclosed
 
 
 def save_enriched(
