@@ -414,6 +414,49 @@ def _safe_evidence(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> str |
         return None
 
 
+ABSURD_COST_MULTIPLE = 2.0
+
+
+def narrow_absurd_cost_roles(roles: dict, enriched: list[EnrichedTxn]) -> dict:
+    """Rescue a cost role that has swallowed the whole ledger.
+
+    A borrower whose "operating expenses" come to seven times its revenue is not a borrower in
+    trouble -- it is a term that has been read as an accounting aggregate when the clause meant a
+    line item, and the ledgers put large unrelated costs (rent, insurance, marketing) alongside the
+    real one precisely so that reading fails. Rather than assert what does or does not belong in
+    operating expenses -- rent and payroll genuinely are operating costs in ordinary accounting --
+    this only acts on a total that cannot be what the clause meant, and then keeps the rows whose
+    own name or description carries the term itself. Where the wide reading is plausible it does
+    nothing at all.
+    """
+    totals: dict[str, float] = {}
+    for e in enriched:
+        role = roles.get(e.category, e.category)
+        totals[role] = totals.get(role, 0.0) + e.amount_usd
+
+    revenue = abs(totals.get("revenue", 0.0))
+    adjusted = dict(roles)
+    for role, total in totals.items():
+        if (
+            not role.endswith("_expenses")
+            or not revenue
+            or abs(total) <= ABSURD_COST_MULTIPLE * revenue
+        ):
+            continue
+        term = role.rsplit("_", 1)[0]  # "operating_expenses" -> "operating"
+        named = {
+            e.category
+            for e in enriched
+            if term in e.category.lower() or term in e.description.lower()
+        }
+        if not named:
+            continue
+        for category, mapped in list(adjusted.items()):
+            if mapped == role and category not in named:
+                adjusted[category] = f"{category}_role"
+    return adjusted
+
+
 def compute_covenant(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> ComputeResult:
     # `actual` is always the TRUE metric value even where a carve-out or an untriggered springing
     # test permits it to sit beyond the limit (CASE.ru.md) -- _evaluate keeps the two apart.

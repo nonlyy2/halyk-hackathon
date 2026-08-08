@@ -34,7 +34,7 @@ from covenant.ingest.documents import extract_documents
 from covenant.ingest.ledger import load_ledger
 from covenant.ingest.matching import match_accounts, match_company_names
 from covenant.llm.client import get_client
-from covenant.scoring.compute import compute_covenant, fallback_cell
+from covenant.scoring.compute import compute_covenant, fallback_cell, narrow_absurd_cost_roles
 
 
 def _scenarios(paths: Paths, requested: list[str]) -> list[str]:
@@ -265,6 +265,8 @@ def cmd_build(args, paths: Paths) -> None:
     for sid in template["answers"]:
         spec = load_spec(sid, client, paths.specs)
         loaded = load_enriched(sid, str(paths.enriched))
+        roles = narrow_absurd_cost_roles(spec["roles"], loaded[0]) if spec and loaded else {}
+
         cells: dict[str, dict] = {}
         for key in template["answers"][sid]:
             # A null cell scores exactly like a wrong one, so every failure path still answers.
@@ -274,13 +276,13 @@ def cmd_build(args, paths: Paths) -> None:
                 cov = spec["covenants"].get(key)
                 try:
                     result = (
-                        compute_covenant(cov, spec["roles"], loaded[0])
+                        compute_covenant(cov, roles, loaded[0])
                         if cov
                         else fallback_cell(None, {}, [])
                     )
                 except Exception as exc:  # noqa: BLE001
                     print(f"{sid}.{key}: {exc} -- falling back", file=sys.stderr)
-                    result = fallback_cell(cov, spec["roles"], loaded[0])
+                    result = fallback_cell(cov, roles, loaded[0])
             actual = (
                 result.actual
                 if isinstance(result.actual, (int, float)) and math.isfinite(result.actual)
