@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 
@@ -48,6 +49,11 @@ _MODEL_BY_BACKEND_AND_SIZE = {
 }
 
 MAX_RETRIES = 4
+# Seconds to leave between requests. Free tiers meter per minute, and reacting to a 429 after the
+# fact is not enough: the stages fire several calls back to back, blow the window, and then spend
+# the whole retry budget waiting for it to reopen. Pacing the requests avoids the refusal instead.
+MIN_REQUEST_INTERVAL = float(os.environ.get("COVENANT_MIN_INTERVAL", "0"))
+_last_request_at = 0.0
 DEFAULT_MAX_TOKENS = 4096
 
 
@@ -95,6 +101,17 @@ class Client:
     def _models(self) -> list[str]:
         return [self.model, *self.alternates]
 
+    def _pace(self) -> None:
+        # Only metered providers need this. A local Ollama has no quota, so spacing its calls out
+        # would be pure waiting -- and this pipeline makes over a hundred of them.
+        global _last_request_at
+        if self.backend == "ollama" or MIN_REQUEST_INTERVAL <= 0:
+            return
+        wait = _last_request_at + MIN_REQUEST_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.monotonic()
+
     def _base_url(self, default: str) -> str:
         return (os.environ.get("COVENANT_BASE_URL") or default).rstrip("/")
 
@@ -111,6 +128,7 @@ class Client:
         active = 0
         for attempt in range(MAX_RETRIES + len(self.alternates)):
             serving = models[active]
+            self._pace()
             try:
                 if self.backend == "anthropic":
                     return self._complete_anthropic(serving, system, user, max_tokens, temperature)
@@ -290,6 +308,30 @@ class Client:
         return response.json()["message"]["content"]
 
 
+_MODEL_NAME_HINTS = {
+    "gemini": ("gemini-", "gemma-"),
+    "anthropic": ("claude-",),
+    "alibaba": ("qwen", "glm-", "deepseek-", "kimi-"),
+}
+
+
+def _warn_if_foreign_model(backend: str, model: str) -> None:
+    """Say something when the chosen model plainly belongs to a different provider.
+
+    Backend and model are configured separately, so changing one and forgetting the other sends,
+    say, a Gemini model name to Alibaba's endpoint -- which answers 404 and surfaces as a bare
+    "LLM call failed after 4 attempts", with nothing pointing at the real cause.
+    """
+    hints = _MODEL_NAME_HINTS.get(backend)
+    owners = [b for b, prefixes in _MODEL_NAME_HINTS.items() if model.lower().startswith(prefixes)]
+    if hints and owners and backend not in owners:
+        print(
+            f"warning: COVENANT_BACKEND={backend} but the model {model!r} looks like "
+            f"{owners[0]}'s -- check .env, this usually means one of the two was changed alone",
+            file=sys.stderr,
+        )
+
+
 def get_client(size: str = "complex") -> Client:
     """The client for a tier, with the model overridable without touching code.
 
@@ -303,6 +345,7 @@ def get_client(size: str = "complex") -> Client:
         # comma-separated: the first is the model of record, the rest are fallen through to as each
         # one's quota runs out (see Client).
         names = [n.strip() for n in override.split(",") if n.strip()]
+        _warn_if_foreign_model(backend, names[0])
         return Client(backend=backend, model=names[0], alternates=tuple(names[1:]))
 
     model = _MODEL_BY_BACKEND_AND_SIZE.get((backend, size))

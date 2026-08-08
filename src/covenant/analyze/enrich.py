@@ -381,6 +381,37 @@ def extract_kyc_definitions(ownership_text: str | None, client: Client) -> dict:
     return data
 
 
+def _unclaimed_disclosed_amounts(
+    overrides: dict, txns: pd.DataFrame, source_text: str
+) -> list[str]:
+    """Ledger rows whose exact amount is quoted in the documents but which no override mentions.
+
+    The disclosures come as tables, and a model asked for them in one pass drops a row now and
+    then -- silently, because nothing counts them. An amount written to the cent that matches a
+    ledger row is a disclosure about that row by construction, so anything matching and unclaimed
+    is a miss worth another attempt. Categorisation already works this way; extraction did not."""
+    claimed = {
+        str(entry.get("txn_id"))
+        for key in (
+            "reclassifications",
+            "cutoff_exclusions",
+            "one_off_addback_candidates",
+            "amount_overrides",
+        )
+        for entry in overrides.get(key) or []
+    }
+    quoted = set(re.findall(r"\$\s?([\d,]+\.\d{2})", source_text))
+    quoted = {float(q.replace(",", "")) for q in quoted}
+
+    missed = []
+    for row in txns.itertuples():
+        if row.txn_id in claimed or pd.isna(row.amount):
+            continue
+        if abs(float(row.amount)) in quoted:
+            missed.append(row.txn_id)
+    return missed
+
+
 def extract_audit_overrides(addendum_text: str | None, txns: pd.DataFrame, client: Client) -> dict:
     empty = {
         "reclassifications": [],
@@ -397,6 +428,26 @@ def extract_audit_overrides(addendum_text: str | None, txns: pd.DataFrame, clien
     data = client.complete_json(AUDIT_OVERRIDES_PROMPT, user, max_tokens=4096)
     for key in empty:
         data.setdefault(key, [])
+
+    missed = _unclaimed_disclosed_amounts(data, txns, addendum_text)
+    if missed:
+        print(f"  disclosed amounts not accounted for, re-asking: {missed}", flush=True)
+        retry_user = (
+            user
+            + "\n\nYour previous answer left these transactions out, although the addendum quotes "
+            + f"their exact amounts: {missed}. Read what it says about each and place it in the "
+            + "right list, or leave it out only if the text genuinely makes no claim about it. "
+            + "Return the complete JSON object again."
+        )
+        try:
+            second = client.complete_json(AUDIT_OVERRIDES_PROMPT, retry_user, max_tokens=4096)
+        except Exception:  # noqa: BLE001 -- the first answer stands if the retry fails
+            return data
+        for key in empty:
+            second.setdefault(key, [])
+        # keep whichever pass accounted for more of the quoted amounts
+        if len(_unclaimed_disclosed_amounts(second, txns, addendum_text)) < len(missed):
+            return second
     return data
 
 

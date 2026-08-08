@@ -153,7 +153,7 @@ def build_spec(
     data = client.complete_json(SPEC_PROMPT, user, max_tokens=8192, temperature=temperature)
     data.setdefault("roles", {})
     data.setdefault("covenants", {})
-    return data
+    return _sanitise_identifiers(data)
 
 
 def build_spec_voted(
@@ -394,6 +394,33 @@ def save_spec(sid: str, spec: dict, client: Client, cache_dir: Path = CACHE_DIR)
     return path
 
 
+def _sanitise_identifiers(spec: dict) -> dict:
+    """Rename doc_figures keys that are not valid Python identifiers, in the formulas too.
+
+    Models label a disclosed figure the way the document phrases it -- "Aggregate severance program
+    obligation" -- and drop that phrase straight into the formula. It is several bare names with no
+    operator between them, so the expression will not parse at all and the covenant is lost whole,
+    even though every number needed to compute it is present and correct."""
+    for cov in (spec.get("covenants") or {}).values():
+        figures = cov.get("doc_figures") or {}
+        renames = {
+            key: re.sub(r"\W+", "_", key.strip()).strip("_").lower()
+            for key in figures
+            if not key.isidentifier()
+        }
+        if not renames:
+            continue
+        cov["doc_figures"] = {renames.get(k, k): v for k, v in figures.items()}
+        for field in ("formula", "precondition"):
+            expr = cov.get(field)
+            if not expr:
+                continue
+            for old, new_name in sorted(renames.items(), key=lambda kv: -len(kv[0])):
+                expr = expr.replace(old, new_name)
+            cov[field] = expr
+    return spec
+
+
 RESERVED_AGGREGATES = ("related_party_payments", "unrestricted_sub_transfers")
 
 
@@ -415,4 +442,4 @@ def load_spec(sid: str, client: Client, cache_dir: Path = CACHE_DIR) -> dict | N
     path = cache_dir / f"{sid}__{_model_tag(client)}.json"
     if not path.exists():
         return None
-    return _unshadow_reserved_roles(json.loads(path.read_text()))
+    return _unshadow_reserved_roles(_sanitise_identifiers(json.loads(path.read_text())))
