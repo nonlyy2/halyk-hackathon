@@ -113,6 +113,11 @@ _exhausted: dict[str, float] = {}
 _exhausted_lock = threading.Lock()
 
 
+def _mark_exhausted(model: str) -> None:
+    with _exhausted_lock:
+        _exhausted[model] = time.monotonic()
+
+
 def _mark_exhausted_if_daily(model: str, exc: Exception) -> None:
     """A 429 is two different things: a per-minute window, which reopens in seconds, and a daily
     allowance, which does not reopen for hours. Only the second is worth remembering -- the
@@ -297,6 +302,20 @@ class Client:
                 # off for a couple of seconds just spends another attempt on the same refusal.
                 # Honour Retry-After when the server sends one, otherwise wait out the window.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
+                # A 403 is a verdict, not congestion: no entitlement, or a free allowance spent.
+                # Retrying spends the whole budget on a refusal that cannot change -- one run lost
+                # six scenarios to four retries each of "the free quota has been exhausted" before
+                # anything said so. Switch models if there is another, otherwise fail now and let
+                # the caller report it.
+                if status == 403:
+                    _mark_exhausted(serving)
+                    if active < len(models) - 1:
+                        active += 1
+                        print(
+                            f"  {serving} refused (403), switching to {models[active]}", flush=True
+                        )
+                        continue
+                    break
                 if status == 429 and active < len(models) - 1:
                     # this model's quota is spent -- another one's is not, so switch instead of
                     # waiting out a window that will not reopen until tomorrow.

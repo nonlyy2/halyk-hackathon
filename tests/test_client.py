@@ -207,3 +207,30 @@ def test_a_daily_refusal_is_remembered():
 
     client_module._mark_exhausted_if_daily("a", Error())
     assert "a" in client_module._exhausted
+
+
+def test_a_403_is_not_retried(monkeypatch):
+    _clear()
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(1)
+        return FakeResponse(status=403, text="The free quota has been exhausted")
+
+    class Raiser(FakeResponse):
+        def raise_for_status(self):
+            raise client_module.httpx.HTTPStatusError("403", request=None, response=self)
+
+    def raising_post(url, headers=None, json=None, timeout=None):
+        calls.append(1)
+        return Raiser(status=403, text="The free quota has been exhausted")
+
+    monkeypatch.setattr(client_module.httpx, "post", raising_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(client_module, "_ENV_PATH", "")
+    try:
+        Client(backend="openai", model="m").complete("s", "u")
+    except RuntimeError:
+        pass
+    # a refusal that cannot change must cost one call, not the whole retry budget
+    assert len(calls) == 1
