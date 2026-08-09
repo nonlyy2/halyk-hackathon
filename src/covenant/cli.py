@@ -492,8 +492,52 @@ def cmd_build(args, paths: Paths) -> None:
     paths.worksheets.parent.mkdir(parents=True, exist_ok=True)
     paths.worksheets.write_text(json.dumps(worksheets, ensure_ascii=False, indent=2))
     print(f"wrote {args.out} and {paths.worksheets}")
+
+    problems = validate_submission(submission, template)
+    if problems:
+        print(f"UNSUBMITTABLE -- {len(problems)} problem(s):", file=sys.stderr)
+        for problem in problems[:20]:
+            print(f"  {problem}", file=sys.stderr)
+    else:
+        cells = sum(len(c) for c in submission["answers"].values())
+        print(f"submittable: {cells} cells, all template keys present and well-typed")
     if args.score:
         cmd_score(args, paths)
+
+
+def validate_submission(submission: dict, template: dict) -> list[str]:
+    """Everything the scorer would refuse, checked before the file is submitted rather than after.
+
+    A missing, renamed or mistyped cell scores zero exactly like a wrong one (CASE.ru.md Section 4),
+    and the difference is invisible in a 36-cell file read by eye under time pressure. This is the
+    one check with no judgement in it -- every failure here is certain, not suspected.
+    """
+    problems: list[str] = []
+    for sid, cells in template["answers"].items():
+        for key in cells:
+            cell = submission["answers"].get(sid, {}).get(key)
+            if not isinstance(cell, dict):
+                problems.append(f"{sid}.{key}: missing")
+                continue
+            if cell.get("status") not in ("COMPLIANT", "BREACH"):
+                problems.append(f"{sid}.{key}: status is {cell.get('status')!r}")
+            actual = cell.get("actual")
+            if (
+                not isinstance(actual, (int, float))
+                or isinstance(actual, bool)
+                or not math.isfinite(actual)
+                or actual < 0
+            ):
+                problems.append(f"{sid}.{key}: actual is {actual!r}")
+    for sid, cells in submission["answers"].items():
+        for key in cells:
+            if key not in template["answers"].get(sid, {}):
+                problems.append(f"{sid}.{key}: not a template key")
+    if not str(submission.get("team", "")).strip():
+        problems.append("team is empty")
+    if not str(submission.get("contact_email", "")).strip():
+        problems.append("contact_email is empty")
+    return problems
 
 
 def cmd_doctor(args, paths: Paths) -> None:

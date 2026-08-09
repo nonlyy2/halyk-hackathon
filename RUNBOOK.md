@@ -105,21 +105,17 @@ one scenario by hand, and never edit `submission.json` directly.
 
 ## 4. Before submitting
 
-```bash
-uv run python -c "
-import json; d=json.load(open('submission.json'))
-t=json.load(open('$COVENANT_DATA/submission_template.json'))
-assert d['team'] and d['contact_email']
-missing=[(s,k) for s in t['answers'] for k in t['answers'][s] if k not in d['answers'].get(s,{})]
-bad=[(s,k) for s in d['answers'] for k,c in d['answers'][s].items()
-     if c['status'] not in ('COMPLIANT','BREACH') or not isinstance(c['actual'],(int,float))]
-print('missing cells:',missing); print('invalid cells:',bad)
-print('cells:',sum(len(v) for v in d['answers'].values()))
-"
+`build` validates its own output and ends with one of two lines:
+
+```
+submittable: 36 cells, all template keys present and well-typed
+UNSUBMITTABLE -- 2 problem(s): ...
 ```
 
-Both lists must be empty. An empty cell and a wrong cell score the same, so every cell is answered
-by construction — but a template key the pipeline never saw would be a silent zero.
+A missing, renamed or mistyped cell scores zero exactly like a wrong one, and the difference is
+invisible in a 36-cell file read by eye under time pressure. If that line does not say
+`submittable`, fix it before anything else — it is the only check in the whole pipeline with no
+judgement in it, so every failure it reports is certain rather than suspected.
 
 ---
 
