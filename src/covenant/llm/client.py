@@ -144,6 +144,19 @@ def _repair_payload(payload: dict, error_body: str) -> dict | None:
     return None
 
 
+def _dashscope_workspace_header() -> dict:
+    """Alibaba routes a key issued inside a sub-workspace by an explicit header.
+
+    Without it such a key authenticates, resolves its account, and is then refused every model with
+    AccessDenied.Unpurchased -- indistinguishable from an account that has activated nothing. Set
+    ALIBABA_WORKSPACE_ID when the key comes from a workspace rather than the main account.
+    """
+    workspace = os.environ.get("ALIBABA_WORKSPACE_ID") or (
+        dotenv_values(_ENV_PATH).get("ALIBABA_WORKSPACE_ID") if _ENV_PATH else None
+    )
+    return {"X-DashScope-WorkSpace": workspace} if workspace else {}
+
+
 def _hf_extra_body(model: str) -> dict:
     # Qwen3 hybrid-thinking models on the HF router burn their whole output budget on invisible
     # chain-of-thought unless thinking is disabled via chat_template_kwargs. Other model families
@@ -273,6 +286,7 @@ class Client:
                         max_tokens,
                         temperature,
                         extra_body={"enable_thinking": False},
+                        extra_headers=_dashscope_workspace_header(),
                     )
                 return self._complete_ollama(serving, system, user, max_tokens, temperature)
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
@@ -387,6 +401,7 @@ class Client:
         max_tokens: int,
         temperature: float,
         extra_body: dict | None = None,
+        extra_headers: dict | None = None,
     ) -> str:
         # temperature 0 (the default) gives greedy, reproducible decoding for the extraction and
         # classification stages; callers that want sampled diversity (spec self-consistency voting)
@@ -404,7 +419,7 @@ class Client:
         for _ in range(3):
             response = httpx.post(
                 f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={"Authorization": f"Bearer {api_key}", **(extra_headers or {})},
                 json=payload,
                 timeout=180,
             )
