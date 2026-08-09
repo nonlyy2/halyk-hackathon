@@ -60,22 +60,25 @@ _last_request_at = 0.0
 # exists to stay inside a per-minute quota stops holding.
 _pace_lock = threading.Lock()
 
-# Models whose daily quota is spent. A free-tier quota is per model per key and does not reopen
-# until tomorrow, so once one refuses there is nothing to be gained by asking it again -- and the
-# alternates chain would otherwise spend one wasted request, plus its retry backoff, on the dead
-# model before every single call for the rest of the run.
-_exhausted: set[str] = set()
+# Models whose quota was spent, and when. Asking a model whose daily allowance is gone wastes a
+# request and a retry backoff on every call for the rest of the run, so the refusal is remembered --
+# but only for a while. A permanent mark is worse than no mark at all: a day boundary crossing
+# mid-run, a quota raised, or a refusal misread as daily all lock the pipeline out of a model that
+# is actually answering, and with the alternates behind it also spent the run simply stops. Costing
+# one probe per model per interval buys the guarantee that it can always recover.
+EXHAUSTED_RETRY_AFTER = float(os.environ.get("COVENANT_EXHAUSTED_RETRY", "600"))
+_exhausted: dict[str, float] = {}
 _exhausted_lock = threading.Lock()
 
 
 def _mark_exhausted_if_daily(model: str, exc: Exception) -> None:
     """A 429 is two different things: a per-minute window, which reopens in seconds, and a daily
-    allowance, which does not reopen during this run. Only the second is worth remembering -- the
+    allowance, which does not reopen for hours. Only the second is worth remembering -- the
     providers say which in the error body."""
     body = getattr(getattr(exc, "response", None), "text", "") or ""
     if "PerDay" in body or "per day" in body.lower():
         with _exhausted_lock:
-            _exhausted.add(model)
+            _exhausted[model] = time.monotonic()
 
 
 DEFAULT_MAX_TOKENS = 4096
@@ -124,11 +127,16 @@ class Client:
 
     def _models(self) -> list[str]:
         chain = [self.model, *self.alternates]
+        now = time.monotonic()
         with _exhausted_lock:
-            live = [m for m in chain if m not in _exhausted]
+            live = [
+                m
+                for m in chain
+                if now - _exhausted.get(m, -EXHAUSTED_RETRY_AFTER) >= EXHAUSTED_RETRY_AFTER
+            ]
         # never return nothing: with every model spent the call still has to fail with the real
         # error from the provider rather than an IndexError from here.
-        return live or chain[-1:]
+        return live or chain
 
     def _pace(self) -> None:
         # Only metered providers need this. A local Ollama has no quota, so spacing its calls out
