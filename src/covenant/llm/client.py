@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -54,6 +55,29 @@ MAX_RETRIES = 4
 # the whole retry budget waiting for it to reopen. Pacing the requests avoids the refusal instead.
 MIN_REQUEST_INTERVAL = float(os.environ.get("COVENANT_MIN_INTERVAL", "0"))
 _last_request_at = 0.0
+# Stages run several scenarios at once, so the pacing clock is shared state: without the lock two
+# threads read the same `_last_request_at`, both decide they may go now, and the interval that
+# exists to stay inside a per-minute quota stops holding.
+_pace_lock = threading.Lock()
+
+# Models whose daily quota is spent. A free-tier quota is per model per key and does not reopen
+# until tomorrow, so once one refuses there is nothing to be gained by asking it again -- and the
+# alternates chain would otherwise spend one wasted request, plus its retry backoff, on the dead
+# model before every single call for the rest of the run.
+_exhausted: set[str] = set()
+_exhausted_lock = threading.Lock()
+
+
+def _mark_exhausted_if_daily(model: str, exc: Exception) -> None:
+    """A 429 is two different things: a per-minute window, which reopens in seconds, and a daily
+    allowance, which does not reopen during this run. Only the second is worth remembering -- the
+    providers say which in the error body."""
+    body = getattr(getattr(exc, "response", None), "text", "") or ""
+    if "PerDay" in body or "per day" in body.lower():
+        with _exhausted_lock:
+            _exhausted.add(model)
+
+
 DEFAULT_MAX_TOKENS = 4096
 
 
@@ -99,7 +123,12 @@ class Client:
     alternates: tuple[str, ...] = ()
 
     def _models(self) -> list[str]:
-        return [self.model, *self.alternates]
+        chain = [self.model, *self.alternates]
+        with _exhausted_lock:
+            live = [m for m in chain if m not in _exhausted]
+        # never return nothing: with every model spent the call still has to fail with the real
+        # error from the provider rather than an IndexError from here.
+        return live or chain[-1:]
 
     def _pace(self) -> None:
         # Only metered providers need this. A local Ollama has no quota, so spacing its calls out
@@ -107,10 +136,11 @@ class Client:
         global _last_request_at
         if self.backend == "ollama" or MIN_REQUEST_INTERVAL <= 0:
             return
-        wait = _last_request_at + MIN_REQUEST_INTERVAL - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-        _last_request_at = time.monotonic()
+        with _pace_lock:
+            wait = _last_request_at + MIN_REQUEST_INTERVAL - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            _last_request_at = time.monotonic()
 
     def _base_url(self, default: str) -> str:
         return (os.environ.get("COVENANT_BASE_URL") or default).rstrip("/")
@@ -176,6 +206,7 @@ class Client:
                 if status == 429 and active < len(models) - 1:
                     # this model's quota is spent -- another one's is not, so switch instead of
                     # waiting out a window that will not reopen until tomorrow.
+                    _mark_exhausted_if_daily(serving, exc)
                     active += 1
                     print(
                         f"  quota exhausted on {serving}, switching to {models[active]}", flush=True

@@ -35,15 +35,33 @@ src/covenant/
     textnorm.py          homoglyph/whitespace normalisation for letter-spaced PDF text
   analyze/
     classify.py          document type, and whether it speaks for the covenants
-    clauses.py           slices clause text, KYC ownership, audit addendum
+    clauses.py           slices clause text, KYC ownership, audit addendum, with fallbacks
     documents_index.py   the single "which documents speak for this borrower" lookup
     enrich.py            per-transaction category, related-party & unrestricted-sub tags, overrides
     spec.py              clause -> computable spec (roles, formula, threshold, carve-out)
+    binding.py           covenant term -> the transactions that actually constitute it
+    review.py            second opinion on the cells whose own signals say they are fragile
   scoring/
     compute.py           the deterministic evaluator
     confidence.py        per-cell fragility signals, for triage
     rubric.py            dev-only scorer implementing the case's own scale
 ```
+
+## Where a term comes from
+
+A covenant clause names a line item — "Операционные расходы по аудированной отчётности Заёмщика" —
+and the ledger plants far larger rent, payroll, marketing and insurance rows beside the real one,
+all of which a textbook chart of accounts would also call operating costs. Bucketing by accounting
+substance therefore reads the term an order of magnitude too wide, and the metric with it.
+
+So membership is decided by `binding.py`, as a reading task over the actual transactions with the
+clause's wording in view, and it is asked with the clause's **threshold masked** — selecting rows
+and knowing the number they must clear are two jobs that must not meet. `spec.py` still decides the
+covenant's shape; the model only ever selects rows, and `compute.py` still does every sum.
+
+Two terms are deliberately never bound: the related-party and unrestricted-subsidiary aggregates
+follow from the KYC table by exact name match, because this dataset seeds lexically similar decoy
+counterparties precisely to defeat anything looser.
 
 ## Setup
 
@@ -57,11 +75,23 @@ export COVENANT_DATA=/path/to/dataset    # or pass --data to every command
 ## Running
 
 ```bash
-covenant classify            # documents -> type + authority          (cached)
-covenant enrich              # ledger rows -> categories, tags, overrides
-covenant spec --votes 3      # clauses -> computable specs, self-consistency voted
-covenant build --team TEAM --contact-email you@example.com
+covenant classify                    # documents -> type + authority          (cached)
+covenant enrich --votes 3            # ledger rows -> categories, tags, overrides
+covenant spec   --votes 3            # clauses -> computable specs, self-consistency voted
+covenant bind   --votes 3            # covenant terms -> transactions, voted per row
+covenant doctor                      # preflight: what could still be quietly wrong
+covenant build --review --team TEAM --contact-email you@example.com
 ```
+
+`doctor` reads only artefacts the run produced — never the ground truth — and reports what would
+otherwise cost cells silently: a borrower with no authoritative agreement, a clause heading that was
+not found, a KYC ownership section that fell back to the whole dossier, an unresolvable formula
+variable, an unconverted foreign-currency row, a term nothing bound, a cell sitting on a knife edge.
+It is the list to spend the end of a timed run on.
+
+`build` writes `submission.json` after every scenario, so a crash late in a run still leaves a
+submittable file, and writes a per-cell worksheet to `<data>/.cache/worksheets.json` — which
+transactions fed which term — which is what to read when a cell looks wrong.
 
 Each stage caches under `<data>/.cache/`, so reruns are cheap and every intermediate is
 inspectable. Spec caches are tagged with the model that produced them, so switching models writes
