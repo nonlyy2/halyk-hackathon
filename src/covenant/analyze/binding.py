@@ -184,6 +184,13 @@ def _payload(spec: dict, clauses: dict[str, str], enriched: list[EnrichedTxn]) -
             continue
         text = clauses.get(key) or cov.get("metric") or ""
         clause_texts[key] = mask_threshold(text, cov.get("threshold"))
+        # The spec's own one-line description of each term. It carries the term's SCOPE, which the
+        # clause often states only for the concept and not for the name: a covenant capping
+        # transfers as a fraction of total capital expenditure names both, and without
+        # "total capital expenditure incurred by the Borrower" the binder collapses the denominator
+        # onto the numerator's single row. What it must never carry is a COMPOSITION -- see the
+        # constraint on "variables" in SPEC_PROMPT, which exists because one such description
+        # enumerated an item its clause never mentions and the binder duly included it.
         variables = cov.get("variables") or {}
         terms[key] = {name: variables.get(name, "") for name in wanted}
     if not terms:

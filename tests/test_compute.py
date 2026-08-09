@@ -123,6 +123,56 @@ def test_a_reclassified_row_inside_a_bound_term_is_still_an_evidence_candidate()
     assert _find_evidence_txn(cov, roles, ledger, binding) == "TXN-X-0010"
 
 
+def test_a_denominator_collapsed_onto_its_numerator_is_dropped():
+    ledger = [
+        txn(
+            "TXN-X-0020",
+            -418_204.37,
+            "capex",
+            description="Transfer of plant to subsidiary",
+            unrestricted_sub_transfer=True,
+        ),
+        txn("TXN-X-0021", -900_000.00, "capex", description="Purchase of equipment"),
+        txn("TXN-X-0022", -600_000.00, "capex", description="Construction works"),
+    ]
+    roles = {"capex": "capital_expenditure"}
+    cov = {
+        "formula": "unrestricted_sub_transfers / capital_expenditure",
+        "comparison": "<=",
+        "threshold": 0.15,
+    }
+    # the binder narrowed the denominator with the numerator's own qualifier -> ratio 1.0
+    collapsed = {"capital_expenditure": {"txn_ids": ["TXN-X-0020"]}}
+    assert compute_covenant(cov, roles, ledger, collapsed).actual == pytest.approx(0.22, abs=0.01)
+
+
+def test_a_denominator_that_legitimately_differs_is_kept():
+    ledger = [
+        txn("TXN-X-0020", -400_000.00, "capex", unrestricted_sub_transfer=True),
+        txn("TXN-X-0021", -600_000.00, "capex"),
+        txn("TXN-X-0022", -900_000.00, "other_capex"),
+    ]
+    roles = {"capex": "capital_expenditure", "other_capex": "capital_expenditure"}
+    cov = {
+        "formula": "unrestricted_sub_transfers / capital_expenditure",
+        "comparison": "<=",
+        "threshold": 0.15,
+    }
+    binding = {"capital_expenditure": {"txn_ids": ["TXN-X-0020", "TXN-X-0021"]}}
+    # denominator is wider than the numerator, so the binding stands: 400k / 1.0M
+    assert compute_covenant(cov, roles, ledger, binding).actual == pytest.approx(0.40, abs=0.01)
+
+
+def test_narrow_absurd_cost_roles_fires_whatever_the_role_is_called():
+    # the rescue used to match the literal suffix "_expenses", so a model that named the same role
+    # "operating_cost" or "interest_expense" got no rescue at all
+    for name in ("operating_expenses", "operating_expense", "operating_costs", "operating_cost"):
+        roles = {c: (name if r == "operating_expenses" else r) for c, r in ROLES.items()}
+        narrowed = narrow_absurd_cost_roles(roles, LEDGER)
+        assert narrowed["rent"] != name, name
+        assert narrowed["operating_costs"] == name, name
+
+
 def test_narrow_absurd_cost_roles_leaves_a_bound_term_alone():
     # the heuristic would otherwise strip rent and marketing out of operating_expenses
     narrowed = narrow_absurd_cost_roles(ROLES, LEDGER)
