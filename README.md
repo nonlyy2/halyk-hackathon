@@ -151,3 +151,15 @@ still resolved, and 11 of 12 enriched identically — the one difference being a
 Russian rather than English. The remaining dataset-specific literals are recurring format-convention
 strings (heading names, supersession markers) used as slicers, each with a general fallback beneath
 it, and `doctor` reports whenever a fallback fired.
+
+The score under `reformat` is 32.2 against 33.5 on the original, and the gap is the honest reading
+of how much of that 33.5 is robust. Two cells move, both because a bound term absorbed rows it
+should not have — cosmetic changes to how the documents are captioned shifted the row selection,
+though the clause text and every transaction were identical. Term boundaries are therefore the
+pipeline's real uncertainty, not its formatting, its arithmetic or its plumbing.
+
+**Raising `--votes` does not fix that, measured.** At `--votes 5`, 50 of 51 bound terms come back
+identical to `--votes 3` and both datasets score exactly the same; the single term that moves is
+one the line-item guard discards either way. Voting suppresses sampling noise, and there is none
+left to suppress — the model answers the perturbed input confidently and differently. The remaining
+lever is model quality on the `complex` tier, not more samples of the same judgement.
