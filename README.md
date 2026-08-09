@@ -1,5 +1,7 @@
 # covenant-agent
 
+**English** · [Русский](README.ru.md)
+
 Reads "dirty" corporate-loan paperwork — credit agreements, KYC dossiers, audit reports, mixed with
 decoys and superseded editions under opaque hash filenames — together with a category-less
 transaction ledger, and decides for every financial covenant whether it is **COMPLIANT** or
