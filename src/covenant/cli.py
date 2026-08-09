@@ -630,6 +630,54 @@ def cmd_doctor(args, paths: Paths) -> None:
     print(f"{problems} thing(s) worth a look" if problems else "nothing flagged")
 
 
+def cmd_run(args, paths: Paths) -> None:
+    """Every stage in order, one command, resumable.
+
+    Six commands typed by hand at the end of a timed window is six chances to fumble an argument,
+    skip a stage or run them out of order -- and the failure looks like a broken pipeline rather
+    than a mistyped line. Each stage still caches, so re-running this after a crash costs only what
+    had not finished.
+
+    A stage that fails does not stop the run: `build` degrades rather than refusing (no binding ->
+    the role map, no spec -> the covenant's own threshold), so reaching it with partial artefacts
+    always beats submitting nothing.
+    """
+    common = {"data": args.data, "scenarios": [], "fresh": False}
+    stages = [
+        ("classify", cmd_classify, {}),
+        ("enrich", cmd_enrich, {"votes": args.votes}),
+        ("spec", cmd_spec, {"votes": args.votes, "vote_temperature": 0.5}),
+        ("bind", cmd_bind, {"votes": args.votes, "vote_temperature": 0.4}),
+    ]
+    failed: list[str] = []
+    for name, fn, extra in stages:
+        print(f"\n=== {name} ===", flush=True)
+        started = time.monotonic()
+        try:
+            fn(argparse.Namespace(**common, **extra), paths)
+            print(f"=== {name} done in {time.monotonic() - started:.0f}s ===", flush=True)
+        except Exception as exc:  # noqa: BLE001 -- reaching build with less beats not reaching it
+            failed.append(name)
+            print(f"=== {name} FAILED after {time.monotonic() - started:.0f}s: {exc}", flush=True)
+
+    print("\n=== build ===", flush=True)
+    cmd_build(
+        argparse.Namespace(
+            data=args.data,
+            out=args.out,
+            team=args.team,
+            contact_email=args.contact_email,
+            review=args.review,
+            score=args.score,
+        ),
+        paths,
+    )
+    print("\n=== doctor ===", flush=True)
+    cmd_doctor(argparse.Namespace(data=args.data), paths)
+    if failed:
+        print(f"\nstages that failed: {', '.join(failed)} -- re-run them alone", file=sys.stderr)
+
+
 def cmd_ping(args, paths: Paths) -> None:
     """Does the configured provider actually answer? One call per tier, before anything expensive.
 
@@ -718,6 +766,15 @@ def main(argv: list[str] | None = None) -> None:
 
     ping = subparsers.add_parser("ping")
     ping.set_defaults(fn=cmd_ping)
+
+    run = subparsers.add_parser("run", help="classify -> enrich -> spec -> bind -> build -> doctor")
+    run.set_defaults(fn=cmd_run)
+    run.add_argument("--team", required=True)
+    run.add_argument("--contact-email", required=True)
+    run.add_argument("--out", default="submission.json")
+    run.add_argument("--votes", type=int, default=3)
+    run.add_argument("--review", action="store_true")
+    run.add_argument("--score", action="store_true", help="dev only: score against ground truth")
 
     score = subparsers.add_parser("score")
     score.set_defaults(fn=cmd_score)

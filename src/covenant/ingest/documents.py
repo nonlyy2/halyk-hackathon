@@ -85,9 +85,20 @@ def extract_documents(
         return list(pool.map(lambda p: _extract_one(p, cache_path), paths))
 
 
+UNBOUNDED_CONCURRENCY = 64  # a ceiling, not a target: callers cap this at the number of items
+
+
 def concurrency() -> int:
-    """How many LLM calls / documents to work on at once. One means the old sequential behaviour."""
+    """How many documents / scenarios to work on at once.
+
+    0 means "as many as there are", for a paid endpoint whose rate limit is far above anything this
+    pipeline produces -- the whole run is then only as slow as its slowest single call. On a metered
+    free tier the limit that matters is COVENANT_MIN_INTERVAL, and raising concurrency past it only
+    parallelises the waiting.
+    """
+    raw = os.environ.get("COVENANT_CONCURRENCY", "4")
     try:
-        return max(1, int(os.environ.get("COVENANT_CONCURRENCY", "4")))
+        value = int(raw)
     except ValueError:
         return 4
+    return UNBOUNDED_CONCURRENCY if value <= 0 else value

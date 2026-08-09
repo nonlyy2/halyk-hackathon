@@ -26,6 +26,15 @@ exhausted one can be swapped mid-run.
 ## Running
 
 ```bash
+uv run covenant run --team TEAM --contact-email you@example.com
+```
+
+That is every stage in order — classify, enrich, spec, bind, build, doctor — and it is what to use
+under time pressure. A stage that fails does not stop it: `build` degrades rather than refusing, so
+reaching it with partial artefacts beats submitting nothing. The stages also exist separately, for
+re-running just one:
+
+```bash
 uv run covenant classify              # documents -> type + authority
 uv run covenant enrich --votes 3      # ledger rows -> categories, tags, audit overrides
 uv run covenant spec   --votes 3      # clauses -> formula, threshold, period, carve-out

@@ -63,10 +63,15 @@ rows it measures. That is where model quality converts into score.
 ```bash
 export COVENANT_DATA=/path/to/private-set
 
-uv run covenant classify              # ~68 documents; cached, resumable
-uv run covenant enrich --votes 3      # categories, related-party tags, audit overrides
-uv run covenant spec   --votes 3      # clause -> formula, threshold, period, carve-out
-uv run covenant bind   --votes 3      # covenant term -> the transactions that constitute it
+uv run covenant run --team "дримтим" --contact-email assylkhan.kerey@nu.edu.kz
+```
+
+One command, every stage in order, then `build` and `doctor`. A stage that fails does not stop it —
+`build` degrades rather than refusing, so reaching it with partial artefacts always beats
+submitting nothing, and the failed stage is named at the end so it can be re-run alone:
+
+```bash
+uv run covenant spec --votes 3        # or classify / enrich / bind
 uv run covenant build --team "дримтим" --contact-email assylkhan.kerey@nu.edu.kz
 ```
 
