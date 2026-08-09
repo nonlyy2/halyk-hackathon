@@ -259,6 +259,15 @@ def _evaluate(
         return value, "COMPLIANT"  # springing covenant not triggered
 
     status_value, effective_threshold = _apply_carve_out(cov, roles, enriched, value, binding)
+    # A cap tested against a NEGATIVE metric passes trivially -- "-64.39 <= 3.00" is true -- and the
+    # cell then reports 64.39 COMPLIANT, contradicting itself on its face. The metric only goes
+    # negative when a profit term it divides by does (revenue below operating expenses), and a
+    # borrower whose EBITDA has gone negative has not satisfied a leverage cap; it has made the
+    # ratio meaningless. Judge the magnitude, which is also the number reported.
+    # Only for caps: a floor (">= 0.28") is correctly failed by a negative value already, and
+    # taking the magnitude there would turn the worst case into a pass.
+    if status_value < 0 and cov["comparison"] in ("<=", "<"):
+        status_value = abs(status_value)
     # Compared UNROUNDED, deliberately. Testing the value as reported to two decimals looks more
     # coherent -- it stops a cell reading "actual 0.04, limit 0.04, status BREACH" -- but the key
     # does not work that way: this set contains two cells that both report 0.04 against a 0.04
@@ -617,13 +626,73 @@ def without_collapsed_ratios(
     return cleaned
 
 
+def without_absurd_bound_terms(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None
+) -> dict | None:
+    """Drop a bound cost term that totals many times the borrower's revenue.
+
+    `is_a_line_item` catches a selection that is too WIDE in rows; this catches one too LARGE in
+    money, which the row count cannot see. A term of twenty-one rows out of fifty-five is not
+    suspicious by count, and if one of them is a payroll line fifty times the borrower's revenue the
+    metric is decided by that row alone -- one scenario's EBITDA came out at -330,000,000 against
+    revenue of 6,900,000.
+
+    The same reasoning as narrow_absurd_cost_roles, which has always applied it to the role map:
+    a total that cannot be what the clause meant is not made meaningful by having been chosen row
+    by row. The term falls back to the role map, where narrow_absurd_cost_roles can act on it.
+    """
+    if not binding:
+        return binding
+    totals: dict[str, float] = {}
+    for e in enriched:
+        role = roles.get(e.category, e.category)
+        totals[role] = totals.get(role, 0.0) + e.amount_usd
+    revenue = abs(totals.get("revenue", 0.0))
+    if not revenue:
+        return binding
+
+    cleaned = dict(binding)
+    for name in list(cleaned):
+        ids = bound_ids(cleaned, name)
+        if not ids or name == "revenue":
+            continue
+        total = abs(sum(e.amount_usd for e in enriched if e.txn_id in set(ids)))
+        if total > ABSURD_COST_MULTIPLE * revenue:
+            cleaned.pop(name)
+    return cleaned
+
+
+# A ratio metric this many times its own limit is not a ratio at all -- it is money, and the
+# formula lost the division. Set far above any real breach: a borrower can exceed a leverage cap
+# several times over, never a thousandfold.
+_RATIO_TYPE_ERROR_MULTIPLE = 1000.0
+
+
+def _is_type_error(cov: dict, value: float) -> bool:
+    """Did a covenant declared as a ratio compute a money figure?
+
+    The clause states its limit as a multiple ("shall not exceed 0.30x of Revenue for the period")
+    and the spec records threshold_unit "ratio", but the formula came back as a single revenue term
+    with the division dropped -- 9,215,956 against a limit of 0.30. Asserting that number is worse
+    than admitting the covenant could not be computed: the fallback at least reports the clause's
+    own limit, which is the closest knowable quantity to the metric.
+    """
+    threshold = cov.get("threshold")
+    if cov.get("threshold_unit") != "ratio" or not isinstance(threshold, (int, float)):
+        return False
+    return bool(threshold) and abs(value) > _RATIO_TYPE_ERROR_MULTIPLE * abs(threshold)
+
+
 def compute_covenant(
     cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
 ) -> ComputeResult:
+    binding = without_absurd_bound_terms(cov, roles, enriched, binding)
     binding = without_collapsed_ratios(cov, roles, enriched, binding)
     # `actual` is always the TRUE metric value even where a carve-out or an untriggered springing
     # test permits it to sit beyond the limit (CASE.ru.md) -- _evaluate keeps the two apart.
     value, status = _evaluate(cov, roles, enriched, binding)
+    if _is_type_error(cov, value):
+        return fallback_cell({**cov, "formula": None}, roles, enriched, binding)
     evidence_txn_id = _find_evidence_txn(cov, roles, enriched, binding)
     return ComputeResult(
         status=status, actual=round(abs(value), 2), evidence_txn_id=evidence_txn_id

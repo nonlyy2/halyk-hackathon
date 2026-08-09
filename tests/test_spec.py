@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from covenant.analyze.spec import _coerce_numbers, _extract_names, validate_spec
+from covenant.analyze.spec import (
+    _coerce_numbers,
+    _extract_names,
+    self_reported_approximations,
+    validate_spec,
+)
 
 
 def test_a_threshold_written_as_text_is_read_back_as_a_number():
@@ -57,3 +62,57 @@ def test_validate_spec_reports_an_unparseable_formula_rather_than_raising():
 
 def test_extract_names_ignores_the_allowed_function_names():
     assert _extract_names("min(payroll, utilities)") == {"payroll", "utilities"}
+
+
+def test_a_formula_the_model_calls_a_proxy_is_flagged():
+    spec = {
+        "covenants": {
+            "6.1": {
+                "formula": "capital_expenditure",
+                "metric": "Total value of assets transferred to unrestricted subsidiaries",
+                "notes": ["capital_expenditure is used as a proxy for such transfers."],
+            }
+        }
+    }
+    assert "6.1" in self_reported_approximations(spec)
+
+
+def test_a_condition_the_model_says_it_cannot_evaluate_is_flagged():
+    spec = {
+        "covenants": {
+            "6.1": {
+                "formula": "related_party_payments",
+                "metric": "",
+                "notes": [
+                    "Applies only when leverage exceeds 3.00x; condition cannot be evaluated."
+                ],
+            }
+        }
+    }
+    assert "6.1" in self_reported_approximations(spec)
+
+
+def test_a_term_the_model_says_is_missing_from_the_data_is_flagged():
+    spec = {
+        "covenants": {
+            "6.2": {
+                "formula": "revenue - operating_expenses",
+                "metric": "Liquidity contribution",
+                "notes": ["Financing receipts are not represented in the available data."],
+            }
+        }
+    }
+    assert "6.2" in self_reported_approximations(spec)
+
+
+def test_an_ordinary_note_is_not_flagged():
+    spec = {
+        "covenants": {
+            "6.1": {
+                "formula": "revenue - operating_expenses",
+                "metric": "EBITDA for the period",
+                "notes": ["The clause defines EBITDA as revenue less operating expenses."],
+            }
+        }
+    }
+    assert self_reported_approximations(spec) == {}

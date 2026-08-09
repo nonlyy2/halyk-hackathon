@@ -9,6 +9,7 @@ from covenant.scoring.compute import (
     compute_covenant,
     narrow_absurd_cost_roles,
     variable_rows,
+    without_absurd_bound_terms,
 )
 
 # one real operating-costs line surrounded by the large unrelated rows the ledgers plant
@@ -179,3 +180,76 @@ def test_narrow_absurd_cost_roles_leaves_a_bound_term_alone():
     assert narrowed["rent"] != "operating_expenses"
     untouched = narrow_absurd_cost_roles(ROLES, LEDGER, {"operating_expenses"})
     assert untouched == ROLES
+
+
+def test_a_bound_cost_term_many_times_revenue_falls_back_to_the_role_map():
+    ledger = [
+        txn("TXN-Y-0001", 6_900_000.0, "sales", description="Confectionery sales settlement"),
+        txn(
+            "TXN-Y-0002", -202_000_000.0, "payroll", description="Payroll for administrative staff"
+        ),
+        txn("TXN-Y-0003", -800_000.0, "operating_costs", description="Factory operating costs"),
+    ]
+    roles = {
+        "sales": "revenue",
+        "payroll": "operating_expenses",
+        "operating_costs": "operating_expenses",
+    }
+    cov = {"formula": "revenue - operating_expenses", "comparison": ">=", "threshold": 1.0}
+    swollen = {"operating_expenses": {"txn_ids": ["TXN-Y-0002", "TXN-Y-0003"]}}
+    # 202,800,000 against revenue of 6,900,000 cannot be the line item the clause names, however
+    # deliberately the rows were picked
+    cleaned = without_absurd_bound_terms(cov, roles, ledger, swollen)
+    assert "operating_expenses" not in cleaned
+
+
+def test_a_bound_cost_term_of_ordinary_size_is_kept():
+    ledger = [
+        txn("TXN-Y-0001", 6_900_000.0, "sales"),
+        txn("TXN-Y-0003", -800_000.0, "operating_costs"),
+    ]
+    roles = {"sales": "revenue", "operating_costs": "operating_expenses"}
+    cov = {"formula": "revenue - operating_expenses", "comparison": ">=", "threshold": 1.0}
+    binding = {"operating_expenses": {"txn_ids": ["TXN-Y-0003"]}}
+    assert without_absurd_bound_terms(cov, roles, ledger, binding) == binding
+
+
+def test_revenue_itself_is_never_dropped_by_the_size_guard():
+    ledger = [txn("TXN-Y-0001", 6_900_000.0, "sales")]
+    roles = {"sales": "revenue"}
+    cov = {"formula": "revenue", "comparison": ">=", "threshold": 1.0}
+    binding = {"revenue": {"txn_ids": ["TXN-Y-0001"]}}
+    assert without_absurd_bound_terms(cov, roles, ledger, binding) == binding
+
+
+def test_a_cap_is_not_passed_by_a_negative_metric():
+    # "-64.39 <= 3.00" is true, and the cell then reports 64.39 COMPLIANT -- self-contradictory.
+    # A ratio only goes negative when the profit term it divides by does, which is not compliance.
+    ledger = [
+        txn("TXN-Z-0001", 9_215_956.22, "sales"),
+        txn("TXN-Z-0002", -9_343_373.76, "opex"),
+        txn("TXN-Z-0003", 8_204_895.34, "debt"),
+    ]
+    roles = {"sales": "revenue", "opex": "operating_expenses", "debt": "net_debt"}
+    cov = {
+        "formula": "net_debt / (revenue - operating_expenses)",
+        "comparison": "<=",
+        "threshold": 3.0,
+    }
+    result = compute_covenant(cov, roles, ledger, None)
+    assert result.status == "BREACH"
+
+
+def test_a_floor_still_fails_on_a_negative_metric():
+    # taking the magnitude here would turn the worst possible case into a pass
+    ledger = [
+        txn("TXN-Z-0001", 1_000_000.0, "sales"),
+        txn("TXN-Z-0002", -9_000_000.0, "opex"),
+    ]
+    roles = {"sales": "revenue", "opex": "operating_expenses"}
+    cov = {
+        "formula": "(revenue - operating_expenses) / revenue",
+        "comparison": ">=",
+        "threshold": 0.28,
+    }
+    assert compute_covenant(cov, roles, ledger, None).status == "BREACH"
