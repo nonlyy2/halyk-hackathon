@@ -26,9 +26,6 @@ class Ledger:
     def scenario_ids(self) -> list[str]:
         return sorted(self.scenario_to_accounts)
 
-    def accounts_for_scenario(self, scenario_id: str) -> list[str]:
-        return self.scenario_to_accounts.get(scenario_id, [])
-
     def transactions_for(self, scenario_id: str) -> pd.DataFrame:
         return self.df[self.df["scenario_id"] == scenario_id]
 

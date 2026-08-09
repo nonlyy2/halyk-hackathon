@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from covenant.analyze.spec import (
     _coerce_numbers,
+    _drop_double_counted_carve_outs,
     _extract_names,
+    basket_not_subtracted,
     self_reported_approximations,
     validate_spec,
 )
@@ -116,3 +118,52 @@ def test_an_ordinary_note_is_not_flagged():
         }
     }
     assert self_reported_approximations(spec) == {}
+
+
+def test_a_carve_out_repeating_what_the_formula_already_caps_is_dropped():
+    # "after excluding a permitted basket of up to $500,000" belongs in the formula once. Recorded
+    # also as an exclusion it is applied twice, and the second time uncapped -- the borrower gets
+    # an unlimited basket and the verdict flips while `actual` stays right.
+    spec = {
+        "covenants": {
+            "6.3": {
+                "formula": "related_party_payments - min(consulting_services, 500000)",
+                "carve_out": {"kind": "exclusion", "excluded_role": "consulting_services"},
+            }
+        }
+    }
+    assert _drop_double_counted_carve_outs(spec)["covenants"]["6.3"]["carve_out"] is None
+
+
+def test_a_genuine_exclusion_of_something_the_formula_does_not_cap_is_kept():
+    carve = {"kind": "exclusion", "excluded_role": "intra_group_transfers"}
+    spec = {"covenants": {"6.1": {"formula": "operating_expenses", "carve_out": dict(carve)}}}
+    assert _drop_double_counted_carve_outs(spec)["covenants"]["6.1"]["carve_out"] == carve
+
+
+def test_an_allowance_carve_out_is_untouched():
+    carve = {"kind": "allowance", "allowance": 200000}
+    spec = {"covenants": {"6.1": {"formula": "min(a, 5)", "carve_out": dict(carve)}}}
+    assert _drop_double_counted_carve_outs(spec)["covenants"]["6.1"]["carve_out"] == carve
+
+
+def test_a_clause_granting_a_basket_with_no_subtraction_is_flagged():
+    spec = {
+        "clauses": {
+            "6.1": "не превышать $250,000.00, после исключения разрешённой корзины до $300,000.00"
+        },
+        "covenants": {"6.1": {"formula": "related_party_payments"}},
+    }
+    assert basket_not_subtracted(spec) == ["6.1"]
+
+
+def test_a_basket_clause_whose_formula_subtracts_is_not_flagged():
+    spec = {
+        "clauses": {
+            "6.1": "не превышать $250,000.00, после исключения разрешённой корзины до $300,000.00"
+        },
+        "covenants": {
+            "6.1": {"formula": "related_party_payments - min(consulting_services, 300000)"}
+        },
+    }
+    assert basket_not_subtracted(spec) == []

@@ -55,7 +55,13 @@ from covenant.ingest.documents import concurrency, extract_documents
 from covenant.ingest.ledger import load_ledger
 from covenant.ingest.matching import match_accounts, match_company_names
 from covenant.llm.client import get_client
-from covenant.scoring.compute import compute_covenant, fallback_cell, narrow_absurd_cost_roles
+from covenant.scoring.compute import (
+    compute_covenant,
+    fallback_cell,
+    narrow_absurd_cost_roles,
+    without_absurd_bound_terms,
+    without_collapsed_ratios,
+)
 from covenant.scoring.confidence import cell_confidence
 
 _print_lock = threading.Lock()
@@ -628,6 +634,26 @@ def cmd_doctor(args, paths: Paths) -> None:
                             f"instead: {wide} of {len(loaded[0])} rows"
                         )
                 if loaded is not None:
+                    # Each of these silently replaces the model's own answer with a narrower one.
+                    # That is right when the model over-widened, and wrong when it was correctly
+                    # reading a genuinely broad cost base -- a stronger model is more likely to be
+                    # in the second case, and until now nothing said the override had happened.
+                    dropped = set(binding.get(key, {})) - set(
+                        without_collapsed_ratios(
+                            cov,
+                            spec.get("roles", {}),
+                            loaded[0],
+                            without_absurd_bound_terms(
+                                cov, spec.get("roles", {}), loaded[0], binding.get(key)
+                            ),
+                        )
+                        or {}
+                    )
+                    if dropped:
+                        notes.append(
+                            f"{key}: a guard discarded the model's own selection for "
+                            f"{sorted(dropped)} and fell back to the role map"
+                        )
                     c = cell_confidence(cov, spec.get("roles", {}), loaded[0], binding.get(key))
                     if c.level != "high":
                         notes.append(f"{key}: confidence={c.level} {c.flags or c.signals}")
