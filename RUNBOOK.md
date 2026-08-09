@@ -9,6 +9,10 @@ the order of operations.
 
 Budget the window as **90 minutes of pipeline, 60 minutes of reading `doctor`, 30 minutes spare.**
 
+Measured on a 27-scenario, 84-cell private set: document extraction 10s, `classify` ~5 min,
+`enrich --votes 3` ~12 min, `spec` and `bind` ~5 min each at `COVENANT_CONCURRENCY=4`. The window
+is not tight; what consumes it is diagnosing a stage that fails, which is what `doctor` is for.
+
 ---
 
 ## 0. Before the data arrives (do this now, not then)

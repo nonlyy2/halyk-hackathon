@@ -8,6 +8,10 @@ transaction ledger, and decides for every financial covenant whether it is **COM
 
 The deliverable is one `submission.json` matching `submission_template.json`.
 
+**[SUBMISSIONS.md](SUBMISSIONS.md)** records what was actually submitted: which model produced each
+answer, how to reproduce it, the measured per-model benchmark, and which cells are known to be
+wrong in each version.
+
 ## Setup
 
 ```bash
@@ -110,7 +114,7 @@ resolves to exactly its numerator's rows is an artifact, not a measurement.
 
 ### `--review` is off by default
 
-The critic pass was measured on `gemini-3.1-flash-lite` and cost 7.6 points (33.0 → 25.4): it
+The critic pass was measured on a flash-class model and cost 7.6 points (33.0 → 25.4): it
 changed 14 of 36 cells and most had been correct. Asked "is anything wrong here", a small model
 finds something. Its guardrails held — every correction was recomputed and none could assert a
 status or a value — so the failure was selection quality, not safety. Re-measure before enabling it
