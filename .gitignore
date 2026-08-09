@@ -8,3 +8,4 @@ __pycache__/
 data/
 submission*
 best_run_*/
+data-private/

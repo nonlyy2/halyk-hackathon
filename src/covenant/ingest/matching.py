@@ -51,16 +51,40 @@ def match_company_names(
     return out
 
 
+def _account_needles(account_id: str) -> tuple[str, str | None]:
+    """(the account id as written, a fallback pattern tolerating a corrupted prefix).
+
+    A badly scanned agreement can lose the letters of its own account number -- one reads
+    "$CC-7003" where the ledger says "ACC-7003", the A having come through as a dollar sign, in a
+    document whose Cyrillic is half Latin homoglyphs. Matching only the literal string dropped that
+    borrower's sole current agreement, and with it the covenant text for three cells.
+
+    The digits are what identify the account: across this dataset's 576 accounts the numeric parts
+    are unique, so the fallback keeps the number and the dash exactly and allows any few characters
+    where the prefix should be. It is deliberately anchored on "-<digits>" rather than the digits
+    alone, which would match any figure in the document.
+    """
+    written = normalize(account_id)
+    digits = re.sub(r"^\D+", "", account_id)
+    if not digits or digits == account_id:
+        return written, None
+    # (?!\d) rather than \b: normalize() strips the spaces out, so the number is routinely followed
+    # immediately by a letter ("$CC-7003ДOГOBOP") and a word boundary would never be there.
+    return written, rf"\S{{1,4}}-{re.escape(normalize(digits))}(?!\d)"
+
+
 def match_accounts(docs: list[Doc], ledger: Ledger) -> list[Match]:
-    normalized_accounts = {
-        account_id: normalize(account_id) for account_id in ledger.account_to_scenario
+    needles = {
+        account_id: _account_needles(account_id) for account_id in ledger.account_to_scenario
     }
 
     matches: list[Match] = []
     for doc in docs:
         haystack = normalize(doc.text)
         found_accounts = sorted(
-            account_id for account_id, needle in normalized_accounts.items() if needle in haystack
+            account_id
+            for account_id, (written, loose) in needles.items()
+            if written in haystack or (loose and re.search(loose, haystack))
         )
         if not found_accounts:
             continue
