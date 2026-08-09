@@ -259,6 +259,15 @@ def _evaluate(
         return value, "COMPLIANT"  # springing covenant not triggered
 
     status_value, effective_threshold = _apply_carve_out(cov, roles, enriched, value, binding)
+    # A cap tested against a NEGATIVE metric passes trivially -- "-64.39 <= 3.00" is true -- and the
+    # cell then reports 64.39 COMPLIANT, contradicting itself on its face. The metric only goes
+    # negative when a profit term it divides by does (revenue below operating expenses), and a
+    # borrower whose EBITDA has gone negative has not satisfied a leverage cap; it has made the
+    # ratio meaningless. Judge the magnitude, which is also the number reported.
+    # Only for caps: a floor (">= 0.28") is correctly failed by a negative value already, and
+    # taking the magnitude there would turn the worst case into a pass.
+    if status_value < 0 and cov["comparison"] in ("<=", "<"):
+        status_value = abs(status_value)
     # Compared UNROUNDED, deliberately. Testing the value as reported to two decimals looks more
     # coherent -- it stops a cell reading "actual 0.04, limit 0.04, status BREACH" -- but the key
     # does not work that way: this set contains two cells that both report 0.04 against a 0.04
@@ -653,6 +662,27 @@ def without_absurd_bound_terms(
     return cleaned
 
 
+# A ratio metric this many times its own limit is not a ratio at all -- it is money, and the
+# formula lost the division. Set far above any real breach: a borrower can exceed a leverage cap
+# several times over, never a thousandfold.
+_RATIO_TYPE_ERROR_MULTIPLE = 1000.0
+
+
+def _is_type_error(cov: dict, value: float) -> bool:
+    """Did a covenant declared as a ratio compute a money figure?
+
+    The clause states its limit as a multiple ("shall not exceed 0.30x of Revenue for the period")
+    and the spec records threshold_unit "ratio", but the formula came back as a single revenue term
+    with the division dropped -- 9,215,956 against a limit of 0.30. Asserting that number is worse
+    than admitting the covenant could not be computed: the fallback at least reports the clause's
+    own limit, which is the closest knowable quantity to the metric.
+    """
+    threshold = cov.get("threshold")
+    if cov.get("threshold_unit") != "ratio" or not isinstance(threshold, (int, float)):
+        return False
+    return bool(threshold) and abs(value) > _RATIO_TYPE_ERROR_MULTIPLE * abs(threshold)
+
+
 def compute_covenant(
     cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
 ) -> ComputeResult:
@@ -661,6 +691,8 @@ def compute_covenant(
     # `actual` is always the TRUE metric value even where a carve-out or an untriggered springing
     # test permits it to sit beyond the limit (CASE.ru.md) -- _evaluate keeps the two apart.
     value, status = _evaluate(cov, roles, enriched, binding)
+    if _is_type_error(cov, value):
+        return fallback_cell({**cov, "formula": None}, roles, enriched, binding)
     evidence_txn_id = _find_evidence_txn(cov, roles, enriched, binding)
     return ComputeResult(
         status=status, actual=round(abs(value), 2), evidence_txn_id=evidence_txn_id
