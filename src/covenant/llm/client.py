@@ -6,14 +6,47 @@ import time
 from dataclasses import dataclass
 
 import httpx
-from dotenv import load_dotenv
+from dotenv import dotenv_values, find_dotenv, load_dotenv
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-HF_TOKEN = os.environ.get("HF_TOKEN")
-ALIBABA_CLOUD_API_KEY = os.environ.get("ALIBABA_CLOUD_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+_ENV_PATH = find_dotenv(usecwd=True)
+_key_lock = threading.Lock()
+_last_seen_key: dict[str, str] = {}
+
+
+def api_key(*names: str) -> str | None:
+    """The credential as it stands RIGHT NOW, re-read from .env on every call.
+
+    A free-tier key is spent in a few hundred requests and then replaced, and a run outlives
+    several of them. Reading the value once at import meant a key swapped into .env changed
+    nothing until the process restarted -- and restarting mid-stage throws away whatever was in
+    flight and re-spends the calls that produced it.
+
+    The file wins over the process environment, because editing .env is how a key gets replaced.
+    Re-reading costs one small file read per request, against a hundred-odd requests a run.
+    """
+    from_file = dotenv_values(_ENV_PATH) if _ENV_PATH else {}
+    for name in names:
+        value = from_file.get(name) or os.environ.get(name)
+        if not value:
+            continue
+        with _key_lock:
+            changed = _last_seen_key.get(name) not in (None, value)
+            _last_seen_key[name] = value
+        if changed:
+            # A new key carries its own untouched allowance, so everything learned about which
+            # models were spent applied to the old one and must not be held against this one.
+            with _exhausted_lock:
+                _exhausted.clear()
+            print(f"  {name} changed -- exhausted-quota state cleared", flush=True)
+        return value
+    return None
+
+
+def gemini_key() -> str | None:
+    return api_key("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
 
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 # A dedicated Alibaba workspace gets its own host, so the endpoint has to be configurable rather
@@ -24,6 +57,9 @@ DASHSCOPE_BASE_URL = os.environ.get(
 ).rstrip("/")
 # Gemini speaks the OpenAI protocol on this path, so it needs no transport of its own.
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+ANTHROPIC_VERSION = "2023-06-01"
 OLLAMA_BASE_URL = "http://localhost:11434"
 
 # Starting points only -- COVENANT_MODEL_SMALL / COVENANT_MODEL_COMPLEX in .env override any of
@@ -38,6 +74,10 @@ _MODEL_BY_BACKEND_AND_SIZE = {
     ("gemini", "complex"): "gemini-3.1-flash-lite",
     ("anthropic", "small"): "claude-haiku-4-5-20251001",
     ("anthropic", "complex"): "claude-sonnet-5",
+    # Starting points only, like every row here: whatever the organisers' key is entitled to is set
+    # with COVENANT_MODEL_SMALL / COVENANT_MODEL_COMPLEX, without touching this file.
+    ("openai", "small"): "gpt-4o-mini",
+    ("openai", "complex"): "gpt-4o",
     ("huggingface", "small"): "Qwen/Qwen3-8B:nscale",
     ("huggingface", "complex"): "openai/gpt-oss-120b:cerebras",  # qwen3.5-27b
     ("alibaba", "small"): "qwen3-8b",
@@ -73,6 +113,11 @@ _exhausted: dict[str, float] = {}
 _exhausted_lock = threading.Lock()
 
 
+def _mark_exhausted(model: str) -> None:
+    with _exhausted_lock:
+        _exhausted[model] = time.monotonic()
+
+
 def _mark_exhausted_if_daily(model: str, exc: Exception) -> None:
     """A 429 is two different things: a per-minute window, which reopens in seconds, and a daily
     allowance, which does not reopen for hours. Only the second is worth remembering -- the
@@ -84,6 +129,37 @@ def _mark_exhausted_if_daily(model: str, exc: Exception) -> None:
 
 
 DEFAULT_MAX_TOKENS = 4096
+
+
+def _repair_payload(payload: dict, error_body: str) -> dict | None:
+    """A payload the server rejected, fixed from what it complained about -- or None if not ours.
+
+    Kept deliberately narrow: only the two parameters providers actually disagree on, and only when
+    the server names them. Anything else is a real error and must surface rather than be retried.
+    """
+    body = error_body.lower()
+    if "max_completion_tokens" in body and "max_tokens" in payload:
+        fixed = dict(payload)
+        fixed["max_completion_tokens"] = fixed.pop("max_tokens")
+        return fixed
+    if "temperature" in body and "temperature" in payload:
+        fixed = dict(payload)
+        fixed.pop("temperature")
+        return fixed
+    return None
+
+
+def _dashscope_workspace_header() -> dict:
+    """Alibaba routes a key issued inside a sub-workspace by an explicit header.
+
+    Without it such a key authenticates, resolves its account, and is then refused every model with
+    AccessDenied.Unpurchased -- indistinguishable from an account that has activated nothing. Set
+    ALIBABA_WORKSPACE_ID when the key comes from a workspace rather than the main account.
+    """
+    workspace = os.environ.get("ALIBABA_WORKSPACE_ID") or (
+        dotenv_values(_ENV_PATH).get("ALIBABA_WORKSPACE_ID") if _ENV_PATH else None
+    )
+    return {"X-DashScope-WorkSpace": workspace} if workspace else {}
 
 
 def _hf_extra_body(model: str) -> dict:
@@ -102,13 +178,15 @@ def _select_backend() -> str:
     forced = os.environ.get("COVENANT_BACKEND")
     if forced:
         return forced
-    if ANTHROPIC_API_KEY:
+    if api_key("ANTHROPIC_API_KEY"):
         return "anthropic"
-    if GEMINI_API_KEY:
+    if api_key("OPENAI_API_KEY"):
+        return "openai"
+    if gemini_key():
         return "gemini"
-    if HF_TOKEN:
+    if api_key("HF_TOKEN"):
         return "huggingface"
-    if ALIBABA_CLOUD_API_KEY:
+    if api_key("ALIBABA_CLOUD_API_KEY"):
         return "alibaba"
     return "ollama"
 
@@ -175,7 +253,7 @@ class Client:
                 if self.backend == "huggingface":
                     return self._complete_openai_compatible(
                         self._base_url(HF_ROUTER_BASE_URL),
-                        HF_TOKEN,
+                        api_key("HF_TOKEN"),
                         serving,
                         system,
                         user,
@@ -186,7 +264,17 @@ class Client:
                 if self.backend == "gemini":
                     return self._complete_openai_compatible(
                         self._base_url(GEMINI_BASE_URL),
-                        GEMINI_API_KEY,
+                        gemini_key(),
+                        serving,
+                        system,
+                        user,
+                        max_tokens,
+                        temperature,
+                    )
+                if self.backend == "openai":
+                    return self._complete_openai_compatible(
+                        self._base_url(OPENAI_BASE_URL),
+                        api_key("OPENAI_API_KEY"),
                         serving,
                         system,
                         user,
@@ -196,13 +284,14 @@ class Client:
                 if self.backend == "alibaba":
                     return self._complete_openai_compatible(
                         self._base_url(DASHSCOPE_BASE_URL),
-                        ALIBABA_CLOUD_API_KEY,
+                        api_key("ALIBABA_CLOUD_API_KEY"),
                         serving,
                         system,
                         user,
                         max_tokens,
                         temperature,
                         extra_body={"enable_thinking": False},
+                        extra_headers=_dashscope_workspace_header(),
                     )
                 return self._complete_ollama(serving, system, user, max_tokens, temperature)
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
@@ -213,6 +302,20 @@ class Client:
                 # off for a couple of seconds just spends another attempt on the same refusal.
                 # Honour Retry-After when the server sends one, otherwise wait out the window.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
+                # A 403 is a verdict, not congestion: no entitlement, or a free allowance spent.
+                # Retrying spends the whole budget on a refusal that cannot change -- one run lost
+                # six scenarios to four retries each of "the free quota has been exhausted" before
+                # anything said so. Switch models if there is another, otherwise fail now and let
+                # the caller report it.
+                if status == 403:
+                    _mark_exhausted(serving)
+                    if active < len(models) - 1:
+                        active += 1
+                        print(
+                            f"  {serving} refused (403), switching to {models[active]}", flush=True
+                        )
+                        continue
+                    break
                 if status == 429 and active < len(models) - 1:
                     # this model's quota is spent -- another one's is not, so switch instead of
                     # waiting out a window that will not reopen until tomorrow.
@@ -278,17 +381,34 @@ class Client:
     def _complete_anthropic(
         self, model: str, system: str, user: str, max_tokens: int, temperature: float
     ) -> str:
-        import anthropic
+        """Anthropic's Messages API over plain httpx, deliberately without the SDK.
 
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            messages=[{"role": "user", "content": user}],
+        The SDK was an optional dependency, so a run handed an ANTHROPIC_API_KEY selected this
+        backend and then died on `import anthropic` -- the one failure mode that cannot be fixed
+        by configuration, which is exactly what a credential dropped in at the last minute needs to
+        avoid. httpx is already required for every other provider and the protocol is three fields.
+        """
+        response = httpx.post(
+            f"{self._base_url(ANTHROPIC_BASE_URL)}/messages",
+            headers={
+                "x-api-key": api_key("ANTHROPIC_API_KEY") or "",
+                "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "system": system,
+                "messages": [{"role": "user", "content": user}],
+            },
+            timeout=180,
         )
-        return response.content[0].text
+        response.raise_for_status()
+        # join every text block: a model with extended thinking returns reasoning blocks alongside
+        # the answer, and taking content[0] blindly would return the reasoning instead of the JSON.
+        blocks = response.json().get("content") or []
+        return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
     def _complete_openai_compatible(
         self,
@@ -300,6 +420,7 @@ class Client:
         max_tokens: int,
         temperature: float,
         extra_body: dict | None = None,
+        extra_headers: dict | None = None,
     ) -> str:
         # temperature 0 (the default) gives greedy, reproducible decoding for the extraction and
         # classification stages; callers that want sampled diversity (spec self-consistency voting)
@@ -314,15 +435,28 @@ class Client:
             "temperature": temperature,
             **(extra_body or {}),
         }
-        response = httpx.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-            timeout=180,
-        )
+        for _ in range(3):
+            response = httpx.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", **(extra_headers or {})},
+                json=payload,
+                timeout=180,
+            )
+            # Providers sharing the OpenAI protocol still disagree about two parameters: some
+            # models take `max_completion_tokens` and reject `max_tokens`, and some accept only
+            # their default temperature. Both refusals are 400s that name the offending field, so
+            # the request is repaired from what the server said rather than from a table of which
+            # model wants which -- a table that would be wrong for whatever model is handed to us.
+            if response.status_code == 400 and (
+                repaired := _repair_payload(payload, response.text)
+            ):
+                payload = repaired
+                continue
+            response.raise_for_status()
+            # content can be null when a model emits only reasoning / an empty turn -- coerce to ""
+            # so callers get a retryable empty string instead of a None that crashes on .strip().
+            return response.json()["choices"][0]["message"]["content"] or ""
         response.raise_for_status()
-        # content can be null when a model emits only reasoning / an empty turn -- coerce to ""
-        # so callers get a retryable empty string instead of a None that crashes on .strip().
         return response.json()["choices"][0]["message"]["content"] or ""
 
     def _complete_ollama(
@@ -352,6 +486,7 @@ class Client:
 _MODEL_NAME_HINTS = {
     "gemini": ("gemini-", "gemma-"),
     "anthropic": ("claude-",),
+    "openai": ("gpt-", "o1-", "o3-", "o4-"),
     "alibaba": ("qwen", "glm-", "deepseek-", "kimi-"),
 }
 

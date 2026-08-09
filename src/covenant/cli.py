@@ -630,6 +630,84 @@ def cmd_doctor(args, paths: Paths) -> None:
     print(f"{problems} thing(s) worth a look" if problems else "nothing flagged")
 
 
+def cmd_run(args, paths: Paths) -> None:
+    """Every stage in order, one command, resumable.
+
+    Six commands typed by hand at the end of a timed window is six chances to fumble an argument,
+    skip a stage or run them out of order -- and the failure looks like a broken pipeline rather
+    than a mistyped line. Each stage still caches, so re-running this after a crash costs only what
+    had not finished.
+
+    A stage that fails does not stop the run: `build` degrades rather than refusing (no binding ->
+    the role map, no spec -> the covenant's own threshold), so reaching it with partial artefacts
+    always beats submitting nothing.
+    """
+    common = {"data": args.data, "scenarios": [], "fresh": False}
+    stages = [
+        ("classify", cmd_classify, {}),
+        ("enrich", cmd_enrich, {"votes": args.votes}),
+        ("spec", cmd_spec, {"votes": args.votes, "vote_temperature": 0.5}),
+        ("bind", cmd_bind, {"votes": args.votes, "vote_temperature": 0.4}),
+    ]
+    failed: list[str] = []
+    for name, fn, extra in stages:
+        print(f"\n=== {name} ===", flush=True)
+        started = time.monotonic()
+        try:
+            fn(argparse.Namespace(**common, **extra), paths)
+            print(f"=== {name} done in {time.monotonic() - started:.0f}s ===", flush=True)
+        except Exception as exc:  # noqa: BLE001 -- reaching build with less beats not reaching it
+            failed.append(name)
+            print(f"=== {name} FAILED after {time.monotonic() - started:.0f}s: {exc}", flush=True)
+
+    print("\n=== build ===", flush=True)
+    cmd_build(
+        argparse.Namespace(
+            data=args.data,
+            out=args.out,
+            team=args.team,
+            contact_email=args.contact_email,
+            review=args.review,
+            score=args.score,
+        ),
+        paths,
+    )
+    print("\n=== doctor ===", flush=True)
+    cmd_doctor(argparse.Namespace(data=args.data), paths)
+    if failed:
+        print(f"\nstages that failed: {', '.join(failed)} -- re-run them alone", file=sys.stderr)
+
+
+def cmd_ping(args, paths: Paths) -> None:
+    """Does the configured provider actually answer? One call per tier, before anything expensive.
+
+    A credential handed over at the last minute is the likeliest thing to be wrong, and every way
+    it can be wrong -- unknown model, no entitlement, a key for a different provider, a typo -- is
+    indistinguishable from the pipeline being broken once a stage is running. This separates the
+    two in a couple of seconds.
+    """
+    ok = True
+    for size in ("small", "complex"):
+        client = get_client(size)
+        label = f"{size:8s} {client.backend}/{client.model}"
+        started = time.monotonic()
+        try:
+            reply = client.complete_json(
+                'Reply with strict JSON only, no commentary: {"ok": 1}',
+                "Return the object.",
+                max_tokens=64,
+            )
+            print(f"  {label}: OK ({time.monotonic() - started:.1f}s, replied {reply})")
+        except Exception as exc:  # noqa: BLE001 -- reporting the failure IS this command's job
+            ok = False
+            print(f"  {label}: FAILED -- {exc}", file=sys.stderr)
+    if not ok:
+        raise SystemExit(
+            "provider not usable. Check the key, and set COVENANT_BACKEND and "
+            "COVENANT_MODEL_SMALL / COVENANT_MODEL_COMPLEX to a model that key is entitled to."
+        )
+
+
 def cmd_score(args, paths: Paths) -> None:
     from covenant.scoring.rubric import format_report, score_submission
 
@@ -685,6 +763,18 @@ def main(argv: list[str] | None = None) -> None:
 
     doctor = subparsers.add_parser("doctor")
     doctor.set_defaults(fn=cmd_doctor)
+
+    ping = subparsers.add_parser("ping")
+    ping.set_defaults(fn=cmd_ping)
+
+    run = subparsers.add_parser("run", help="classify -> enrich -> spec -> bind -> build -> doctor")
+    run.set_defaults(fn=cmd_run)
+    run.add_argument("--team", required=True)
+    run.add_argument("--contact-email", required=True)
+    run.add_argument("--out", default="submission.json")
+    run.add_argument("--votes", type=int, default=3)
+    run.add_argument("--review", action="store_true")
+    run.add_argument("--score", action="store_true", help="dev only: score against ground truth")
 
     score = subparsers.add_parser("score")
     score.set_defaults(fn=cmd_score)
