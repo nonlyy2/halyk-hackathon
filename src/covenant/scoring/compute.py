@@ -172,7 +172,7 @@ def variable_rows(
     if name == "unrestricted_sub_transfers":
         return "tag", [e for e in filtered if e.unrestricted_sub_transfer]
 
-    # Aliasing (PIPELINE.md): a formula term must resolve to its WHOLE role's sum, whether it's
+    # Aliasing: a formula term must resolve to its WHOLE role's sum, whether it's
     # spelled as the role name or as any single category in that role. Resolve the name to a target
     # role first -- if it's a role name use it; if it's a category name use that category's role --
     # then sum every transaction in that role. (Matching only the exact category would silently drop

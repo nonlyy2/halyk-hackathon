@@ -6,7 +6,7 @@ One LLM call per scenario produces:
   operating_expenses, revenue, ...). Inventory-driven, not free-form invention -- the model is
   given the exact list of categories that actually occur in this scenario's enriched ledger and
   must map every one of them, never invent a category that isn't in the list. This is what
-  structurally prevents the catch-all-bucket bug (PIPELINE.md): committing to "what is this
+  structurally prevents the catch-all-bucket bug: committing to "what is this
   transaction" already happened in enrich.py, before any covenant was in view; this stage only
   assigns each already-fixed category to a role.
 - "covenants": per covenant key, a formula over role names (or the two built-in tag aggregates,
@@ -343,6 +343,12 @@ def _aggregate_specs(samples: list[dict], category_inventory: list[str]) -> dict
         "threshold_unit",
         "precondition",
         "period_quarter",
+        # "evidence" is voted but never read: compute.py derives the evidence transaction by
+        # counterfactual instead, which is measurably right (9 of 9 on the public key, under three
+        # models) where this field is only the model's opinion. Left in the prompt and in the vote
+        # because removing it changes what the prompt asks for, and every submitted answer was
+        # produced by the prompt as it stands -- a cleanup here would desync the code from the
+        # files it is meant to reproduce. Delete both together after the deadline.
         "evidence",
         "doc_figures",
     ]

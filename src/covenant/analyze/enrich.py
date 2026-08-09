@@ -1,6 +1,6 @@
 """Stage A -- enrich a scenario's ledger rows once, covenant-agnostic.
 
-Three independent layers, applied in order, matching PIPELINE.md's architecture:
+Three independent layers, applied in order:
 
 1. Categorize every transaction from its OWN description alone (no covenant in view yet --
    this is what structurally prevents the catch-all-bucket bug: a model asked to bucket
