@@ -92,6 +92,14 @@ not name invents a definition the document never gave, and every term you add th
 omits makes the reported value wrong. Where the clause itemises what the metric comprises, include \
 exactly those items. Do not reference any name that isn't independently one of those three kinds. \
 Must evaluate to the metric's actual value (not a boolean).
+Write out a composite the CLAUSE ITSELF defines ("EBITDA means Revenue less Operating expenses"), \
+but do NOT expand an accounting CAPTION the clause simply names -- "Operating expenses", "Revenue", \
+"Capital expenditure" are single line items of the borrower's statements, not sums for you to \
+assemble. Where a clause names such a caption, give some category that role name in "roles" and \
+reference that ONE name in the formula; enumerating the categories you believe make up the caption \
+("rent + insurance + marketing + utilities + ...") asserts a composition the clause never stated \
+and is wrong whenever the borrower's statements report the caption more narrowly. Which \
+transactions the caption covers is decided later, against the clause's own wording.
   - "comparison": one of "<=", "<", ">=", ">", "==" -- how the formula's value relates to \
 "threshold" when COMPLIANT.
   - "threshold": the numeric threshold, exactly as stated (no unit symbols).

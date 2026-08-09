@@ -116,8 +116,11 @@ def cell_confidence(
         e.unrestricted_sub_transfer for e in enriched
     ):
         flags.append("unrestricted_sub_covenant_but_zero_matches")
-    if any(e.currency != "USD" for e in txns):
-        flags.append("foreign_currency_transaction_in_scope")
+    # only an UNCONVERTED one: a row converted at the auditor's disclosed rate is in dollars like
+    # any other, and flagging it made this signal fire on nearly every cell that had any foreign
+    # currency at all. A row whose amount_usd still equals its ledger amount is the untrusted one.
+    if any(e.currency != "USD" and e.amount_usd == e.amount for e in txns):
+        flags.append("unconverted_foreign_currency_in_scope")
     carve = cov.get("carve_out")
     if isinstance(carve, dict) and carve.get("kind") == "discretionary":
         # status computed from the raw threshold, but the clause permits a discretionary exception

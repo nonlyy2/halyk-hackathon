@@ -533,11 +533,10 @@ def cmd_doctor(args, paths: Paths) -> None:
             notes.append("no enriched cache")
         else:
             enriched = loaded[0]
-            unconverted = [
-                e.txn_id for e in enriched if e.currency != "USD" and not e.amount_corrected
-            ]
-            if unconverted:
-                notes.append(f"foreign currency with no disclosed rate: {unconverted}")
+            # An unconverted foreign-currency row is only worth reporting where a covenant actually
+            # sums it -- most ledgers carry one or two that no clause touches, and a preflight that
+            # cries wolf on nine scenarios out of twelve does not get read. cell_confidence() raises
+            # it per cell, in scope, below.
             nan_rows = [e.txn_id for e in enriched if e.amount_usd != e.amount_usd]
             if nan_rows:
                 notes.append(f"rows with no resolved amount: {nan_rows}")
@@ -558,6 +557,17 @@ def cmd_doctor(args, paths: Paths) -> None:
                 wanted, got = set(bindable_terms(cov)), set(binding.get(key, {}))
                 if wanted - got:
                     notes.append(f"{key}: unbound terms {sorted(wanted - got)}")
+                if loaded is not None:
+                    wide = {
+                        term: len(entry.get("txn_ids") or [])
+                        for term, entry in binding.get(key, {}).items()
+                        if not is_a_line_item(len(entry.get("txn_ids") or []), len(loaded[0]))
+                    }
+                    if wide:
+                        notes.append(
+                            f"{key}: term(s) too wide to be a line item, using the role map "
+                            f"instead: {wide} of {len(loaded[0])} rows"
+                        )
                 if loaded is not None:
                     c = cell_confidence(cov, spec.get("roles", {}), loaded[0], binding.get(key))
                     if c.level != "high":
