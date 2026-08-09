@@ -6,4 +6,5 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 data/
-submission.json
+submission*
+best_run_*/
