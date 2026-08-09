@@ -15,9 +15,32 @@ Budget the window as **90 minutes of pipeline, 60 minutes of reading `doctor`, 3
 
 ```bash
 uv sync
-uv run pytest -q                      # 55 tests, all must pass
+uv run pytest -q                      # all must pass
 tesseract --version                   # OCR fallback for scanned pages
 ```
+
+**If the organisers hand over a key on the day**, put it in `.env` and run one command:
+
+```bash
+uv run covenant ping
+```
+
+That is the whole integration. Any of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+`HF_TOKEN`, `ALIBABA_CLOUD_API_KEY` selects its provider on its own; every one is spoken to over
+plain `httpx`, so there is no SDK to install and no import that can fail. `ping` makes one call per
+tier and prints the model and latency, or says exactly what went wrong — do not start a stage until
+it says OK, because from inside a running stage a bad credential is indistinguishable from a broken
+pipeline.
+
+If the key is entitled to a different model than the default, set it and re-ping — no code change:
+
+```bash
+COVENANT_MODEL_COMPLEX=<their strongest model> COVENANT_MODEL_SMALL=<their cheap model> \
+  uv run covenant ping
+```
+
+A key can also be swapped mid-run: credentials are re-read from `.env` on every request, so
+replacing an exhausted key takes effect on the next call without restarting a stage.
 
 Have the `.env` ready with the strongest model available on the `complex` tier and a chain of
 alternates behind it, so one exhausted quota does not stop the run:

@@ -94,6 +94,108 @@ def test_reading_the_same_key_twice_does_not_clear_anything(tmp_path, monkeypatc
     assert "m" in client_module._exhausted
 
 
+class FakeResponse:
+    def __init__(self, payload=None, status=200, text=""):
+        self._payload = payload or {}
+        self.status_code = status
+        self.text = text or str(payload)
+        self.headers = {}
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise AssertionError(f"unexpected raise_for_status at {self.status_code}")
+
+
+def test_anthropic_is_called_over_plain_http_with_no_sdk(monkeypatch):
+    _clear()
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(url=url, headers=headers, body=json)
+        return FakeResponse({"content": [{"type": "text", "text": '{"ok":1}'}]})
+
+    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(client_module, "_ENV_PATH", "")
+    c = Client(backend="anthropic", model="claude-sonnet-5")
+    assert c.complete("sys", "usr", max_tokens=64) == '{"ok":1}'
+    assert sent["url"].endswith("/messages")
+    assert sent["headers"]["x-api-key"] == "k"
+    assert sent["headers"]["anthropic-version"] == client_module.ANTHROPIC_VERSION
+    assert sent["body"]["system"] == "sys"
+
+
+def test_anthropic_reasoning_blocks_do_not_displace_the_answer(monkeypatch):
+    _clear()
+    monkeypatch.setattr(
+        client_module.httpx,
+        "post",
+        lambda *a, **k: FakeResponse(
+            {"content": [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": "ANS"}]}
+        ),
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(client_module, "_ENV_PATH", "")
+    assert Client(backend="anthropic", model="m").complete("s", "u") == "ANS"
+
+
+def test_openai_goes_to_the_openai_endpoint(monkeypatch):
+    _clear()
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(url=url, headers=headers)
+        return FakeResponse({"choices": [{"message": {"content": "hi"}}]})
+
+    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(client_module, "_ENV_PATH", "")
+    assert Client(backend="openai", model="gpt-4o").complete("s", "u") == "hi"
+    assert sent["url"].startswith(client_module.OPENAI_BASE_URL)
+    assert sent["headers"]["Authorization"] == "Bearer k"
+
+
+def test_a_model_wanting_max_completion_tokens_is_retried_with_it(monkeypatch):
+    _clear()
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(dict(json))
+        if "max_tokens" in json:
+            return FakeResponse(status=400, text="Unsupported parameter: use max_completion_tokens")
+        return FakeResponse({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(client_module, "_ENV_PATH", "")
+    assert Client(backend="openai", model="m").complete("s", "u", max_tokens=99) == "ok"
+    assert "max_tokens" in calls[0] and calls[1]["max_completion_tokens"] == 99
+
+
+def test_a_model_refusing_a_custom_temperature_is_retried_without_it(monkeypatch):
+    _clear()
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(dict(json))
+        if json.get("temperature") == 0.5:
+            return FakeResponse(status=400, text="'temperature' does not support 0.5")
+        return FakeResponse({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr(client_module, "_ENV_PATH", "")
+    assert Client(backend="openai", model="m").complete("s", "u", temperature=0.5) == "ok"
+    assert "temperature" not in calls[1]
+
+
+def test_an_unrelated_400_is_not_silently_retried():
+    assert client_module._repair_payload({"max_tokens": 1}, "model not found") is None
+
+
 def test_a_daily_refusal_is_remembered():
     _clear()
 

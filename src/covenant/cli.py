@@ -630,6 +630,36 @@ def cmd_doctor(args, paths: Paths) -> None:
     print(f"{problems} thing(s) worth a look" if problems else "nothing flagged")
 
 
+def cmd_ping(args, paths: Paths) -> None:
+    """Does the configured provider actually answer? One call per tier, before anything expensive.
+
+    A credential handed over at the last minute is the likeliest thing to be wrong, and every way
+    it can be wrong -- unknown model, no entitlement, a key for a different provider, a typo -- is
+    indistinguishable from the pipeline being broken once a stage is running. This separates the
+    two in a couple of seconds.
+    """
+    ok = True
+    for size in ("small", "complex"):
+        client = get_client(size)
+        label = f"{size:8s} {client.backend}/{client.model}"
+        started = time.monotonic()
+        try:
+            reply = client.complete_json(
+                'Reply with strict JSON only, no commentary: {"ok": 1}',
+                "Return the object.",
+                max_tokens=64,
+            )
+            print(f"  {label}: OK ({time.monotonic() - started:.1f}s, replied {reply})")
+        except Exception as exc:  # noqa: BLE001 -- reporting the failure IS this command's job
+            ok = False
+            print(f"  {label}: FAILED -- {exc}", file=sys.stderr)
+    if not ok:
+        raise SystemExit(
+            "provider not usable. Check the key, and set COVENANT_BACKEND and "
+            "COVENANT_MODEL_SMALL / COVENANT_MODEL_COMPLEX to a model that key is entitled to."
+        )
+
+
 def cmd_score(args, paths: Paths) -> None:
     from covenant.scoring.rubric import format_report, score_submission
 
@@ -685,6 +715,9 @@ def main(argv: list[str] | None = None) -> None:
 
     doctor = subparsers.add_parser("doctor")
     doctor.set_defaults(fn=cmd_doctor)
+
+    ping = subparsers.add_parser("ping")
+    ping.set_defaults(fn=cmd_ping)
 
     score = subparsers.add_parser("score")
     score.set_defaults(fn=cmd_score)

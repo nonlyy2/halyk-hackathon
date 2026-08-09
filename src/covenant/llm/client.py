@@ -57,6 +57,9 @@ DASHSCOPE_BASE_URL = os.environ.get(
 ).rstrip("/")
 # Gemini speaks the OpenAI protocol on this path, so it needs no transport of its own.
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+ANTHROPIC_VERSION = "2023-06-01"
 OLLAMA_BASE_URL = "http://localhost:11434"
 
 # Starting points only -- COVENANT_MODEL_SMALL / COVENANT_MODEL_COMPLEX in .env override any of
@@ -71,6 +74,10 @@ _MODEL_BY_BACKEND_AND_SIZE = {
     ("gemini", "complex"): "gemini-3.1-flash-lite",
     ("anthropic", "small"): "claude-haiku-4-5-20251001",
     ("anthropic", "complex"): "claude-sonnet-5",
+    # Starting points only, like every row here: whatever the organisers' key is entitled to is set
+    # with COVENANT_MODEL_SMALL / COVENANT_MODEL_COMPLEX, without touching this file.
+    ("openai", "small"): "gpt-4o-mini",
+    ("openai", "complex"): "gpt-4o",
     ("huggingface", "small"): "Qwen/Qwen3-8B:nscale",
     ("huggingface", "complex"): "openai/gpt-oss-120b:cerebras",  # qwen3.5-27b
     ("alibaba", "small"): "qwen3-8b",
@@ -119,6 +126,24 @@ def _mark_exhausted_if_daily(model: str, exc: Exception) -> None:
 DEFAULT_MAX_TOKENS = 4096
 
 
+def _repair_payload(payload: dict, error_body: str) -> dict | None:
+    """A payload the server rejected, fixed from what it complained about -- or None if not ours.
+
+    Kept deliberately narrow: only the two parameters providers actually disagree on, and only when
+    the server names them. Anything else is a real error and must surface rather than be retried.
+    """
+    body = error_body.lower()
+    if "max_completion_tokens" in body and "max_tokens" in payload:
+        fixed = dict(payload)
+        fixed["max_completion_tokens"] = fixed.pop("max_tokens")
+        return fixed
+    if "temperature" in body and "temperature" in payload:
+        fixed = dict(payload)
+        fixed.pop("temperature")
+        return fixed
+    return None
+
+
 def _hf_extra_body(model: str) -> dict:
     # Qwen3 hybrid-thinking models on the HF router burn their whole output budget on invisible
     # chain-of-thought unless thinking is disabled via chat_template_kwargs. Other model families
@@ -137,6 +162,8 @@ def _select_backend() -> str:
         return forced
     if api_key("ANTHROPIC_API_KEY"):
         return "anthropic"
+    if api_key("OPENAI_API_KEY"):
+        return "openai"
     if gemini_key():
         return "gemini"
     if api_key("HF_TOKEN"):
@@ -220,6 +247,16 @@ class Client:
                     return self._complete_openai_compatible(
                         self._base_url(GEMINI_BASE_URL),
                         gemini_key(),
+                        serving,
+                        system,
+                        user,
+                        max_tokens,
+                        temperature,
+                    )
+                if self.backend == "openai":
+                    return self._complete_openai_compatible(
+                        self._base_url(OPENAI_BASE_URL),
+                        api_key("OPENAI_API_KEY"),
                         serving,
                         system,
                         user,
@@ -311,17 +348,34 @@ class Client:
     def _complete_anthropic(
         self, model: str, system: str, user: str, max_tokens: int, temperature: float
     ) -> str:
-        import anthropic
+        """Anthropic's Messages API over plain httpx, deliberately without the SDK.
 
-        client = anthropic.Anthropic(api_key=api_key("ANTHROPIC_API_KEY"))
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system,
-            messages=[{"role": "user", "content": user}],
+        The SDK was an optional dependency, so a run handed an ANTHROPIC_API_KEY selected this
+        backend and then died on `import anthropic` -- the one failure mode that cannot be fixed
+        by configuration, which is exactly what a credential dropped in at the last minute needs to
+        avoid. httpx is already required for every other provider and the protocol is three fields.
+        """
+        response = httpx.post(
+            f"{self._base_url(ANTHROPIC_BASE_URL)}/messages",
+            headers={
+                "x-api-key": api_key("ANTHROPIC_API_KEY") or "",
+                "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "system": system,
+                "messages": [{"role": "user", "content": user}],
+            },
+            timeout=180,
         )
-        return response.content[0].text
+        response.raise_for_status()
+        # join every text block: a model with extended thinking returns reasoning blocks alongside
+        # the answer, and taking content[0] blindly would return the reasoning instead of the JSON.
+        blocks = response.json().get("content") or []
+        return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
     def _complete_openai_compatible(
         self,
@@ -347,15 +401,28 @@ class Client:
             "temperature": temperature,
             **(extra_body or {}),
         }
-        response = httpx.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json=payload,
-            timeout=180,
-        )
+        for _ in range(3):
+            response = httpx.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+                timeout=180,
+            )
+            # Providers sharing the OpenAI protocol still disagree about two parameters: some
+            # models take `max_completion_tokens` and reject `max_tokens`, and some accept only
+            # their default temperature. Both refusals are 400s that name the offending field, so
+            # the request is repaired from what the server said rather than from a table of which
+            # model wants which -- a table that would be wrong for whatever model is handed to us.
+            if response.status_code == 400 and (
+                repaired := _repair_payload(payload, response.text)
+            ):
+                payload = repaired
+                continue
+            response.raise_for_status()
+            # content can be null when a model emits only reasoning / an empty turn -- coerce to ""
+            # so callers get a retryable empty string instead of a None that crashes on .strip().
+            return response.json()["choices"][0]["message"]["content"] or ""
         response.raise_for_status()
-        # content can be null when a model emits only reasoning / an empty turn -- coerce to ""
-        # so callers get a retryable empty string instead of a None that crashes on .strip().
         return response.json()["choices"][0]["message"]["content"] or ""
 
     def _complete_ollama(
@@ -385,6 +452,7 @@ class Client:
 _MODEL_NAME_HINTS = {
     "gemini": ("gemini-", "gemma-"),
     "anthropic": ("claude-",),
+    "openai": ("gpt-", "o1-", "o3-", "o4-"),
     "alibaba": ("qwen", "glm-", "deepseek-", "kimi-"),
 }
 
