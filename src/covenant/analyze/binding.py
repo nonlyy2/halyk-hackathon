@@ -66,6 +66,17 @@ costs under it. A term whose total comes to several times the borrower's revenue
 read too widely.
 - Where the clause DEFINES its own term (what "Revenue" / "Operating expenses" / "Adjusted EBITDA" \
 comprises for that covenant), the clause's wording governs, over any accounting convention.
+- The captions of a set of financial statements are DISTINCT line items, reported side by side: an \
+operating-expenses caption is the cost of running the borrower's own operations -- servicing, \
+maintenance, production, repair, cleaning and remediation works on its own plant and facilities -- \
+and is reported separately from rent, payroll, marketing, insurance, telecom, utilities, taxes and \
+interest, each of which has its own caption. Do not fold one caption into another. If the ledger \
+contains a row whose description names the caption outright, that row is the caption's core and the \
+burden is on you to justify adding anything else.
+- You are given ALL of this agreement's clauses together for a reason: they measure DIFFERENT \
+things. A payment that another clause singles out and caps in its own right -- a related-party \
+retainer, an intra-group transfer, a capital acquisition -- is that item, and does not also belong \
+inside a broad expense caption that a different clause measures.
 - An auditor's reclassification (reclass_reason set) moves a transaction into or out of a term \
 regardless of what its description says. That is the whole point of the disclosure.
 - Revenue is the borrower's own sales / turnover / throughput / handling settlement. An inflow that \

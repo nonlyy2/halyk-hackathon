@@ -425,6 +425,11 @@ def cmd_build(args, paths: Paths) -> None:
         "answers": {},
     }
     worksheets: dict[str, dict] = {}
+    # only needed to re-slice clause text for a spec cached before it carried any, and only when
+    # the critic is going to read it -- extracting every document otherwise costs a cold run for
+    # nothing, since the rest of this stage is pure arithmetic over the caches.
+    docs = _docs(paths) if args.review else {}
+    index = DocumentIndex.load(paths.classifications) if args.review else DocumentIndex([])
 
     def flush() -> None:
         # allow_nan=False: the default emits the bare token NaN, which is not valid JSON and would
@@ -438,7 +443,7 @@ def cmd_build(args, paths: Paths) -> None:
         spec = load_spec(sid, client, paths.specs)
         loaded = load_enriched(sid, str(paths.enriched))
         bindings = load_binding(sid, client, paths.bindings) or {}
-        clauses = (spec or {}).get("clauses") or {}
+        clauses = _spec_clauses(paths, docs, index, spec, sid) if spec and review_client else {}
         # Only terms the binding actually resolves count as bound. A selection the line-item guard
         # rejects falls back to the role map, and that role then still needs narrowing -- treating
         # it as bound leaves the wide reading in place with nothing left to correct it.
