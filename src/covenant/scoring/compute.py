@@ -617,9 +617,46 @@ def without_collapsed_ratios(
     return cleaned
 
 
+def without_absurd_bound_terms(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None
+) -> dict | None:
+    """Drop a bound cost term that totals many times the borrower's revenue.
+
+    `is_a_line_item` catches a selection that is too WIDE in rows; this catches one too LARGE in
+    money, which the row count cannot see. A term of twenty-one rows out of fifty-five is not
+    suspicious by count, and if one of them is a payroll line fifty times the borrower's revenue the
+    metric is decided by that row alone -- one scenario's EBITDA came out at -330,000,000 against
+    revenue of 6,900,000.
+
+    The same reasoning as narrow_absurd_cost_roles, which has always applied it to the role map:
+    a total that cannot be what the clause meant is not made meaningful by having been chosen row
+    by row. The term falls back to the role map, where narrow_absurd_cost_roles can act on it.
+    """
+    if not binding:
+        return binding
+    totals: dict[str, float] = {}
+    for e in enriched:
+        role = roles.get(e.category, e.category)
+        totals[role] = totals.get(role, 0.0) + e.amount_usd
+    revenue = abs(totals.get("revenue", 0.0))
+    if not revenue:
+        return binding
+
+    cleaned = dict(binding)
+    for name in list(cleaned):
+        ids = bound_ids(cleaned, name)
+        if not ids or name == "revenue":
+            continue
+        total = abs(sum(e.amount_usd for e in enriched if e.txn_id in set(ids)))
+        if total > ABSURD_COST_MULTIPLE * revenue:
+            cleaned.pop(name)
+    return cleaned
+
+
 def compute_covenant(
     cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
 ) -> ComputeResult:
+    binding = without_absurd_bound_terms(cov, roles, enriched, binding)
     binding = without_collapsed_ratios(cov, roles, enriched, binding)
     # `actual` is always the TRUE metric value even where a carve-out or an untriggered springing
     # test permits it to sit beyond the limit (CASE.ru.md) -- _evaluate keeps the two apart.

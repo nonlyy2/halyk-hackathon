@@ -9,6 +9,7 @@ from covenant.scoring.compute import (
     compute_covenant,
     narrow_absurd_cost_roles,
     variable_rows,
+    without_absurd_bound_terms,
 )
 
 # one real operating-costs line surrounded by the large unrelated rows the ledgers plant
@@ -179,3 +180,43 @@ def test_narrow_absurd_cost_roles_leaves_a_bound_term_alone():
     assert narrowed["rent"] != "operating_expenses"
     untouched = narrow_absurd_cost_roles(ROLES, LEDGER, {"operating_expenses"})
     assert untouched == ROLES
+
+
+def test_a_bound_cost_term_many_times_revenue_falls_back_to_the_role_map():
+    ledger = [
+        txn("TXN-Y-0001", 6_900_000.0, "sales", description="Confectionery sales settlement"),
+        txn(
+            "TXN-Y-0002", -202_000_000.0, "payroll", description="Payroll for administrative staff"
+        ),
+        txn("TXN-Y-0003", -800_000.0, "operating_costs", description="Factory operating costs"),
+    ]
+    roles = {
+        "sales": "revenue",
+        "payroll": "operating_expenses",
+        "operating_costs": "operating_expenses",
+    }
+    cov = {"formula": "revenue - operating_expenses", "comparison": ">=", "threshold": 1.0}
+    swollen = {"operating_expenses": {"txn_ids": ["TXN-Y-0002", "TXN-Y-0003"]}}
+    # 202,800,000 against revenue of 6,900,000 cannot be the line item the clause names, however
+    # deliberately the rows were picked
+    cleaned = without_absurd_bound_terms(cov, roles, ledger, swollen)
+    assert "operating_expenses" not in cleaned
+
+
+def test_a_bound_cost_term_of_ordinary_size_is_kept():
+    ledger = [
+        txn("TXN-Y-0001", 6_900_000.0, "sales"),
+        txn("TXN-Y-0003", -800_000.0, "operating_costs"),
+    ]
+    roles = {"sales": "revenue", "operating_costs": "operating_expenses"}
+    cov = {"formula": "revenue - operating_expenses", "comparison": ">=", "threshold": 1.0}
+    binding = {"operating_expenses": {"txn_ids": ["TXN-Y-0003"]}}
+    assert without_absurd_bound_terms(cov, roles, ledger, binding) == binding
+
+
+def test_revenue_itself_is_never_dropped_by_the_size_guard():
+    ledger = [txn("TXN-Y-0001", 6_900_000.0, "sales")]
+    roles = {"sales": "revenue"}
+    cov = {"formula": "revenue", "comparison": ">=", "threshold": 1.0}
+    binding = {"revenue": {"txn_ids": ["TXN-Y-0001"]}}
+    assert without_absurd_bound_terms(cov, roles, ledger, binding) == binding
