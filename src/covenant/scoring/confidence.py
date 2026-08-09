@@ -26,6 +26,7 @@ from covenant.scoring.compute import (
     _period_filtered,
     _resolve_all,
     _safe_eval,
+    bound_ids,
     compute_covenant,
 )
 
@@ -45,13 +46,17 @@ class CellConfidence:
     flags: list[str]
 
 
-def _participating_txns(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> list[EnrichedTxn]:
+def _participating_txns(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
+) -> list[EnrichedTxn]:
     names = _formula_names(cov)
+    bound = {i for name in names for i in (bound_ids(binding, name) or [])}
     out = []
     for e in _period_filtered(enriched, cov):
         role = roles.get(e.category, e.category)
         if (
-            role in names
+            e.txn_id in bound
+            or role in names
             or e.category in names
             or (e.related_party and "related_party_payments" in names)
             or (e.unrestricted_sub_transfer and "unrestricted_sub_transfers" in names)
@@ -60,9 +65,16 @@ def _participating_txns(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> 
     return out
 
 
-def cell_confidence(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> CellConfidence:
+# Above this share of a term's transactions differing between binding samples, the membership is
+# not settled and the cell is worth a second opinion.
+_BINDING_SPLIT = 0.2
+
+
+def cell_confidence(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
+) -> CellConfidence:
     try:
-        result = compute_covenant(cov, roles, enriched)
+        result = compute_covenant(cov, roles, enriched, binding)
     except Exception as exc:  # noqa: BLE001 -- a compute failure is itself the lowest-confidence signal
         return CellConfidence(level="error", signals={}, flags=[f"compute_error: {exc}"])
 
@@ -80,7 +92,7 @@ def cell_confidence(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> Cell
     elif threshold:
         try:
             computed = _safe_eval(
-                cov["formula"], _resolve_all(cov["formula"], cov, roles, enriched)
+                cov["formula"], _resolve_all(cov["formula"], cov, roles, enriched, binding)
             )
             margin = abs(computed - threshold) / abs(threshold)
         except Exception:  # noqa: BLE001
@@ -88,7 +100,7 @@ def cell_confidence(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> Cell
     signals["threshold_margin_pct"] = round(margin * 100, 1) if margin is not None else None
 
     # single-transaction dominance of the deciding sum
-    txns = _participating_txns(cov, roles, enriched)
+    txns = _participating_txns(cov, roles, enriched, binding)
     signals["n_participating_txns"] = len(txns)
     contribs = sorted(
         (abs(e.amount_usd) for e in txns if e.amount_usd == e.amount_usd), reverse=True
@@ -111,6 +123,16 @@ def cell_confidence(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> Cell
         # status computed from the raw threshold, but the clause permits a discretionary exception
         # we can't evaluate from the data -- the verdict could be COMPLIANT even if we say BREACH.
         flags.append("discretionary_carve_out_not_evaluable")
+    # membership the binding samples did not settle: the term this cell rests on came out different
+    # from one sample to the next, so the value is an artefact of which sample won the vote.
+    split = [
+        name
+        for name in names
+        if (binding or {}).get(name, {}).get("disagreement", 0.0) > _BINDING_SPLIT
+    ]
+    if split:
+        signals["binding_disagreement_terms"] = split
+        flags.append("binding_samples_disagreed_on_membership")
 
     # roll up to a level
     level = "high"

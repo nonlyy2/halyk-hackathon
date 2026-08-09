@@ -1,7 +1,9 @@
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,7 +70,24 @@ def _extract_one(path: Path, cache_dir: Path) -> Doc:
 def extract_documents(
     documents_dir: str = "documents", cache_dir: str = ".cache/docling"
 ) -> list[Doc]:
-    """Every PDF in documents_dir, extracted and cached."""
+    """Every PDF in documents_dir, extracted and cached.
+
+    Extraction is done in parallel because a cold run has a couple of hundred files to get through
+    and the scanned ones each shell out to tesseract page by page -- minutes of the submission
+    window, spent waiting on a subprocess. Both pypdfium2 and the tesseract call release the GIL,
+    so threads are enough; the cache write is per-file and atomic enough at this size.
+    """
     documents_path = Path(documents_dir)
     cache_path = Path(cache_dir)
-    return [_extract_one(path, cache_path) for path in sorted(documents_path.glob("*.pdf"))]
+    paths = sorted(documents_path.glob("*.pdf"))
+    workers = min(concurrency(), len(paths)) or 1
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda p: _extract_one(p, cache_path), paths))
+
+
+def concurrency() -> int:
+    """How many LLM calls / documents to work on at once. One means the old sequential behaviour."""
+    try:
+        return max(1, int(os.environ.get("COVENANT_CONCURRENCY", "4")))
+    except ValueError:
+        return 4

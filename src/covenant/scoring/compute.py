@@ -124,19 +124,51 @@ def _period_filtered(enriched: list[EnrichedTxn], cov: dict) -> list[EnrichedTxn
     return out
 
 
-def _resolve_variable(name: str, cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> float:
-    doc_figures = cov.get("doc_figures") or {}
-    if name in doc_figures:
-        return float(doc_figures[name]["amount_usd"])
+def bound_ids(binding: dict | None, name: str) -> list[str] | None:
+    """The transactions binding.py assigned to this term, or None if it did not answer for it."""
+    entry = (binding or {}).get(name)
+    if not isinstance(entry, dict):
+        return None
+    ids = entry.get("txn_ids")
+    return ids if isinstance(ids, list) and ids else None
+
+
+def variable_rows(
+    name: str,
+    cov: dict,
+    roles: dict,
+    enriched: list[EnrichedTxn],
+    binding: dict | None = None,
+) -> tuple[str, list[EnrichedTxn]]:
+    """(how this term resolves, the transactions that feed it).
+
+    The single definition of what a formula term is made of. `_resolve_variable` sums the result and
+    the review worksheet prints it, so the number a cell reports and the rows a critic is shown can
+    never come from two different readings of the same term.
+
+    kind is one of: "doc_figure" (no transactions), "bound", "tag", "role", "empty" (a known term
+    with no rows in this period), "unknown" (a term nothing populated -- an error for the caller).
+    """
+    if name in (cov.get("doc_figures") or {}):
+        return "doc_figure", []
 
     filtered = _period_filtered(enriched, cov)
-    # These clauses cap PAYMENTS TO ("платежи в пользу связанных сторон"), so only outflows count.
-    # Summing signed amounts would let an inflow from an affiliate -- revenue from a related party,
-    # a refund -- net against the payments and under-report the very thing being capped.
+
+    # An explicit membership from binding.py replaces the role lookup for this term -- it was
+    # decided with the clause's wording and the transactions' descriptions both in view, which the
+    # role map never had. The period filter still runs here: the covenant's own dates are the spec's
+    # business, not the selector's. A binding whose rows all fall outside the period, or which named
+    # no rows at all, falls through to the role path rather than asserting a zero.
+    ids = bound_ids(binding, name)
+    if ids is not None:
+        selected = [e for e in filtered if e.txn_id in set(ids)]
+        if selected:
+            return "bound", selected
+
     if name == "related_party_payments":
-        return abs(sum(min(e.amount_usd, 0.0) for e in filtered if e.related_party))
+        return "tag", [e for e in filtered if e.related_party]
     if name == "unrestricted_sub_transfers":
-        return abs(sum(min(e.amount_usd, 0.0) for e in filtered if e.unrestricted_sub_transfer))
+        return "tag", [e for e in filtered if e.unrestricted_sub_transfer]
 
     # Aliasing (PIPELINE.md): a formula term must resolve to its WHOLE role's sum, whether it's
     # spelled as the role name or as any single category in that role. Resolve the name to a target
@@ -155,15 +187,38 @@ def _resolve_variable(name: str, cov: dict, roles: dict, enriched: list[Enriched
         matched = [e for e in filtered if roles.get(e.category, e.category) == name]
     else:
         matched = [e for e in filtered if e.category == name]
-    target_role = name
-    if not matched:
-        # A known role/category with no rows in this period is a legitimate zero (a covenant can
-        # cap a category the borrower simply didn't spend on) -- raising here cost the WHOLE cell.
-        # An unknown name is still an error: it means the model referenced something that was never
-        # populated, which validate_spec() reports, and silently reading it as 0 would hide that.
-        if target_role in set(roles.values()) or target_role in roles:
-            return 0.0
+    if matched:
+        return "role", matched
+    # A known role/category with no rows in this period is a legitimate zero (a covenant can
+    # cap a category the borrower simply didn't spend on) -- raising here cost the WHOLE cell.
+    # An unknown name is still an error: it means the model referenced something that was never
+    # populated, which validate_spec() reports, and silently reading it as 0 would hide that.
+    return ("empty" if name in role_values or name in roles else "unknown"), []
+
+
+def _resolve_variable(
+    name: str,
+    cov: dict,
+    roles: dict,
+    enriched: list[EnrichedTxn],
+    binding: dict | None = None,
+) -> float:
+    kind, rows = variable_rows(name, cov, roles, enriched, binding)
+    if kind == "doc_figure":
+        return float(cov["doc_figures"][name]["amount_usd"])
+    if kind == "tag":
+        # These clauses cap PAYMENTS TO ("платежи в пользу связанных сторон"), so only outflows
+        # count. Summing signed amounts would let an inflow from an affiliate -- revenue from a
+        # related party, a refund -- net against the payments and under-report what is capped.
+        return abs(sum(min(e.amount_usd, 0.0) for e in rows))
+    if kind == "empty":
+        return 0.0
+    if kind == "unknown":
         raise ValueError(f"variable {name!r} is not a known role, category, tag or doc_figure")
+    return _sum_or_raise(rows, name)
+
+
+def _sum_or_raise(matched: list[EnrichedTxn], name: str) -> float:
     nan_txns = [e.txn_id for e in matched if e.amount_usd != e.amount_usd]  # NaN != NaN
     if nan_txns:
         raise ValueError(
@@ -175,31 +230,41 @@ def _resolve_variable(name: str, cov: dict, roles: dict, enriched: list[Enriched
 
 
 def _resolve_all(
-    expr: str, cov: dict, roles: dict, enriched: list[EnrichedTxn]
+    expr: str,
+    cov: dict,
+    roles: dict,
+    enriched: list[EnrichedTxn],
+    binding: dict | None = None,
 ) -> dict[str, float]:
-    return {name: _resolve_variable(name, cov, roles, enriched) for name in _names_in(expr)}
+    return {
+        name: _resolve_variable(name, cov, roles, enriched, binding) for name in _names_in(expr)
+    }
 
 
-def _evaluate(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> tuple[float, str]:
+def _evaluate(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
+) -> tuple[float, str]:
     """(true metric value, status) -- the single definition of status, so the counterfactual
     baseline in _find_evidence_txn can never disagree with what compute_covenant() reports
     (it previously skipped the carve-out and could search around the wrong verdict)."""
     metric = _metric_expr(cov)
-    value = _safe_eval(metric, _resolve_all(metric, cov, roles, enriched))
+    value = _safe_eval(metric, _resolve_all(metric, cov, roles, enriched, binding))
 
     precondition = cov.get("precondition")
     if precondition and not bool(
-        _safe_eval(precondition, _resolve_all(precondition, cov, roles, enriched))
+        _safe_eval(precondition, _resolve_all(precondition, cov, roles, enriched, binding))
     ):
         return value, "COMPLIANT"  # springing covenant not triggered
 
-    status_value, effective_threshold = _apply_carve_out(cov, roles, enriched, value)
+    status_value, effective_threshold = _apply_carve_out(cov, roles, enriched, value, binding)
     ok = _COMPARISONS[cov["comparison"]](status_value, effective_threshold)
     return value, "COMPLIANT" if ok else "BREACH"
 
 
-def _status_only(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> str:
-    return _evaluate(cov, roles, enriched)[1]
+def _status_only(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
+) -> str:
+    return _evaluate(cov, roles, enriched, binding)[1]
 
 
 def _formula_names(cov: dict) -> set[str]:
@@ -249,7 +314,9 @@ def _counterfactuals(e: EnrichedTxn, enriched: list[EnrichedTxn]) -> list[list[E
     return out
 
 
-def _find_evidence_txn(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> str | None:
+def _find_evidence_txn(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
+) -> str | None:
     """The single transaction whose inclusion/exclusion/reclassification/correction flips the
     verdict, found by counterfactual rather than by picking the biggest row. Only transactions that
     are *special by classification* and that participate in this covenant's formula are candidates,
@@ -260,15 +327,20 @@ def _find_evidence_txn(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> s
     never pays, so when several candidates flip -- or none does but a special participating
     transaction exists -- the best-ranked candidate is returned instead of None."""
     try:
-        base = _status_only(cov, roles, enriched)
+        base = _status_only(cov, roles, enriched, binding)
     except ValueError:
         return None
     names = _formula_names(cov)
+    # Where a term was bound explicitly, its rows ARE the term -- the role a transaction happens to
+    # carry no longer decides whether it feeds this covenant, so membership has to be read from the
+    # binding as well, or a reclassified row inside a bound term stops being a candidate at all.
+    bound = {i for name in names for i in (bound_ids(binding, name) or [])}
 
     def participates(e: EnrichedTxn) -> bool:
         role = roles.get(e.category, e.category)
         return (
-            role in names
+            e.txn_id in bound
+            or role in names
             or e.category in names
             or e.raw_category in names
             or roles.get(e.raw_category, e.raw_category) in names
@@ -284,7 +356,7 @@ def _find_evidence_txn(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> s
     for e in candidates:
         for counterfactual in _counterfactuals(e, enriched):
             try:
-                if _status_only(cov, roles, counterfactual) != base:
+                if _status_only(cov, roles, counterfactual, binding) != base:
                     flippers.append(e)
                     break
             except ValueError:
@@ -315,7 +387,11 @@ _COMPARISONS = {
 
 
 def _apply_carve_out(
-    cov: dict, roles: dict, enriched: list[EnrichedTxn], value: float
+    cov: dict,
+    roles: dict,
+    enriched: list[EnrichedTxn],
+    value: float,
+    binding: dict | None = None,
 ) -> tuple[float, float]:
     """Return (effective_value_for_status, effective_threshold) after any computable carve-out.
     A carve-out only affects STATUS, never the reported `actual` (CASE.ru.md: report the true value
@@ -347,22 +423,31 @@ def _apply_carve_out(
         if excluded_role and excluded_role not in _formula_names(cov):
             return value, threshold
         if excluded_role:
+            # dropping the rows from `enriched` also drops them from any bound term, since a
+            # binding is intersected with the transactions it is handed.
+            excluded_bound = set(bound_ids(binding, excluded_role) or [])
             kept = [
                 e
                 for e in enriched
                 if roles.get(e.category, e.category) != excluded_role
                 and e.category != excluded_role
+                and e.txn_id not in excluded_bound
             ]
             try:
                 kept_expr = _metric_expr(cov)
-                return _safe_eval(kept_expr, _resolve_all(kept_expr, cov, roles, kept)), threshold
+                return (
+                    _safe_eval(kept_expr, _resolve_all(kept_expr, cov, roles, kept, binding)),
+                    threshold,
+                )
             except ValueError:
                 return value, threshold
     # discretionary or unknown kind -> not computable here; status uses the raw threshold.
     return value, threshold
 
 
-def fallback_cell(cov: dict | None, roles: dict, enriched: list[EnrichedTxn]) -> ComputeResult:
+def fallback_cell(
+    cov: dict | None, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
+) -> ComputeResult:
     """Best answer still available once compute_covenant() has failed.
 
     CASE.ru.md Section 4 scores a missing, non-numeric or non-`COMPLIANT`/`BREACH` status exactly like a
@@ -375,7 +460,7 @@ def fallback_cell(cov: dict | None, roles: dict, enriched: list[EnrichedTxn]) ->
     if cov is not None:
         for expr in filter(None, [_metric_expr(cov) if cov.get("formula") else None]):
             try:
-                value = abs(_safe_eval(expr, _resolve_all(expr, cov, roles, enriched)))
+                value = abs(_safe_eval(expr, _resolve_all(expr, cov, roles, enriched, binding)))
             except Exception:  # noqa: BLE001 -- any failure just moves to the next fallback
                 break
             threshold, comparison = cov.get("threshold"), cov.get("comparison")
@@ -385,7 +470,7 @@ def fallback_cell(cov: dict | None, roles: dict, enriched: list[EnrichedTxn]) ->
             return ComputeResult(
                 status=status,
                 actual=round(value, 2),
-                evidence_txn_id=_safe_evidence(cov, roles, enriched),
+                evidence_txn_id=_safe_evidence(cov, roles, enriched, binding),
             )
         # The threshold is the covenant's own stated limit, so it is the closest quantity to the
         # metric that is still knowable when the metric itself cannot be computed -- and a borrower
@@ -395,7 +480,7 @@ def fallback_cell(cov: dict | None, roles: dict, enriched: list[EnrichedTxn]) ->
         return ComputeResult(
             status="COMPLIANT",
             actual=_threshold_guess(cov),
-            evidence_txn_id=_safe_evidence(cov, roles, enriched),
+            evidence_txn_id=_safe_evidence(cov, roles, enriched, binding),
         )
     return ComputeResult(status="COMPLIANT", actual=0.0, evidence_txn_id=None)
 
@@ -407,9 +492,11 @@ def _threshold_guess(cov: dict) -> float:
     return 0.0
 
 
-def _safe_evidence(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> str | None:
+def _safe_evidence(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
+) -> str | None:
     try:
-        return _find_evidence_txn(cov, roles, enriched)
+        return _find_evidence_txn(cov, roles, enriched, binding)
     except Exception:  # noqa: BLE001 -- evidence is a bonus; never let it sink a rescued cell
         return None
 
@@ -417,7 +504,9 @@ def _safe_evidence(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> str |
 ABSURD_COST_MULTIPLE = 2.0
 
 
-def narrow_absurd_cost_roles(roles: dict, enriched: list[EnrichedTxn]) -> dict:
+def narrow_absurd_cost_roles(
+    roles: dict, enriched: list[EnrichedTxn], bound_terms: set[str] | None = None
+) -> dict:
     """Rescue a cost role that has swallowed the whole ledger.
 
     A borrower whose "operating expenses" come to seven times its revenue is not a borrower in
@@ -428,7 +517,12 @@ def narrow_absurd_cost_roles(roles: dict, enriched: list[EnrichedTxn]) -> dict:
     this only acts on a total that cannot be what the clause meant, and then keeps the rows whose
     own name or description carries the term itself. Where the wide reading is plausible it does
     nothing at all.
+
+    A term binding.py resolved explicitly is left alone: this is a substring heuristic standing in
+    for the reading that stage now actually performs, so applying it on top could only narrow a set
+    that was already chosen row by row.
     """
+    bound_terms = bound_terms or set()
     totals: dict[str, float] = {}
     for e in enriched:
         role = roles.get(e.category, e.category)
@@ -438,7 +532,8 @@ def narrow_absurd_cost_roles(roles: dict, enriched: list[EnrichedTxn]) -> dict:
     adjusted = dict(roles)
     for role, total in totals.items():
         if (
-            not role.endswith("_expenses")
+            role in bound_terms
+            or not role.endswith("_expenses")
             or not revenue
             or abs(total) <= ABSURD_COST_MULTIPLE * revenue
         ):
@@ -457,11 +552,13 @@ def narrow_absurd_cost_roles(roles: dict, enriched: list[EnrichedTxn]) -> dict:
     return adjusted
 
 
-def compute_covenant(cov: dict, roles: dict, enriched: list[EnrichedTxn]) -> ComputeResult:
+def compute_covenant(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
+) -> ComputeResult:
     # `actual` is always the TRUE metric value even where a carve-out or an untriggered springing
     # test permits it to sit beyond the limit (CASE.ru.md) -- _evaluate keeps the two apart.
-    value, status = _evaluate(cov, roles, enriched)
-    evidence_txn_id = _find_evidence_txn(cov, roles, enriched)
+    value, status = _evaluate(cov, roles, enriched, binding)
+    evidence_txn_id = _find_evidence_txn(cov, roles, enriched, binding)
     return ComputeResult(
         status=status, actual=round(abs(value), 2), evidence_txn_id=evidence_txn_id
     )

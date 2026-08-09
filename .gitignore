@@ -1,5 +1,6 @@
 .env
 .venv/
+CLAUDE.md
 __pycache__/
 *.pyc
 .ruff_cache/

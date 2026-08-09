@@ -157,7 +157,7 @@ def build_spec(
     data = client.complete_json(SPEC_PROMPT, user, max_tokens=8192, temperature=temperature)
     data.setdefault("roles", {})
     data.setdefault("covenants", {})
-    return _split_inflows_from_expense_roles(_sanitise_identifiers(data))
+    return _split_inflows_from_expense_roles(_sanitise_identifiers(_coerce_numbers(data)))
 
 
 def build_spec_voted(
@@ -444,6 +444,45 @@ def _sanitise_identifiers(spec: dict) -> dict:
     return spec
 
 
+_NUMERIC_RE = re.compile(r"^\s*\$?\s*(-?[\d,]*\.?\d+)\s*[x%]?\s*$")
+
+
+def _as_number(value):
+    """A threshold the model wrote as text, read back as the number it plainly is.
+
+    "0.08", "$3,000,000.00" and "1.20x" are all the threshold spelled the way the clause prints it.
+    Left as strings they are not merely untidy: compute.py compares the metric against the threshold,
+    and float-vs-str raises, so the covenant falls through to its fallback and loses the comparison
+    it already had. Anything that does not read as a plain number is left exactly as it is.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        return value
+    match = _NUMERIC_RE.match(value)
+    if not match:
+        return value
+    try:
+        return float(match.group(1).replace(",", ""))
+    except ValueError:
+        return value
+
+
+def _coerce_numbers(spec: dict) -> dict:
+    for cov in (spec.get("covenants") or {}).values():
+        if not isinstance(cov, dict):
+            continue
+        if "threshold" in cov:
+            cov["threshold"] = _as_number(cov["threshold"])
+        carve = cov.get("carve_out")
+        if isinstance(carve, dict) and "allowance" in carve:
+            carve["allowance"] = _as_number(carve["allowance"])
+        for figure in (cov.get("doc_figures") or {}).values():
+            if isinstance(figure, dict) and "amount_usd" in figure:
+                figure["amount_usd"] = _as_number(figure["amount_usd"])
+    return spec
+
+
 RESERVED_AGGREGATES = ("related_party_payments", "unrestricted_sub_transfers")
 
 
@@ -466,5 +505,7 @@ def load_spec(sid: str, client: Client, cache_dir: Path = CACHE_DIR) -> dict | N
     if not path.exists():
         return None
     return _unshadow_reserved_roles(
-        _split_inflows_from_expense_roles(_sanitise_identifiers(json.loads(path.read_text())))
+        _split_inflows_from_expense_roles(
+            _sanitise_identifiers(_coerce_numbers(json.loads(path.read_text())))
+        )
     )

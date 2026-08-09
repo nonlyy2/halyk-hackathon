@@ -53,6 +53,14 @@ class Paths:
     def specs(self) -> Path:
         return self.cache / "specs"
 
+    @property
+    def bindings(self) -> Path:
+        return self.cache / "bindings"
+
+    @property
+    def worksheets(self) -> Path:
+        return self.cache / "worksheets.json"
+
 
 def resolve(data_dir: str | os.PathLike[str] | None = None) -> Paths:
     root = Path(data_dir or os.environ.get("COVENANT_DATA", "data")).expanduser().resolve()
