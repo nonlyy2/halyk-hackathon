@@ -3,7 +3,13 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-TXN_ID_RE = re.compile(r"^TXN-([A-Za-z0-9]+)-\d+$")
+# The case states the rule plainly: a transaction id begins with its borrower's scenario id. It
+# says nothing about what follows, and one borrower numbers its rows TXN-KC-CAP-29 rather than
+# TXN-KC-0029. Requiring a bare number to the end of the string dropped that borrower's account
+# entirely -- no account meant no documents matched, which meant no agreement, no spec and three
+# cells lost, none of it reported as an error. Take the segment the rule actually names and leave
+# the rest alone.
+TXN_ID_RE = re.compile(r"^TXN-([A-Za-z0-9]+)-")
 
 
 def _scenario_id_from_txn_id(txn_id: str) -> str | None:
