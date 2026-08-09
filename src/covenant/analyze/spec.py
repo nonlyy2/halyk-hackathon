@@ -376,6 +376,43 @@ def _extract_names(expr: str) -> set[str]:
     return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in call_func_ids}
 
 
+# The model routinely says, in prose, that the formula it just wrote is not the thing the clause
+# asks for -- "capital_expenditure is used as a proxy for such transfers", "financing receipts are
+# not represented in the available data, so the formula reflects only EBITDA", "condition cannot be
+# evaluated from available data". Those sentences land in "metric" and "notes", which nothing reads
+# back, while the approximation they describe lands in "formula", which decides the answer. Every
+# one of the spec defects found on the private set was confessed this way first.
+#
+# These are hedges in the model's own descriptive voice, not facts about any dataset: they carry no
+# borrower, threshold, category or covenant number, and they read the same whatever the documents
+# say. Matching them costs nothing and needs no second model.
+_HEDGE_RE = re.compile(
+    r"\bproxy\b|\bapproximat|\bcannot be (evaluated|determined|computed)|\bnot (represented|"
+    r"available|disclosed|present) in|\bunable to\b|\bassumed?\b|\bnot expressed\b|\bplaceholder\b"
+    r"|\bне (может быть|представлен|раскрыт)|\bприближ|\bдопущени",
+    re.IGNORECASE,
+)
+
+
+def self_reported_approximations(spec: dict) -> dict[str, str]:
+    """covenant_key -> the sentence in which the model admitted its formula is an approximation.
+
+    A diagnostic, never an automatic edit: the admission says the answer is doubtful, not what the
+    right answer would have been.
+    """
+    found: dict[str, str] = {}
+    for key, cov in (spec.get("covenants") or {}).items():
+        if not isinstance(cov, dict):
+            continue
+        notes = cov.get("notes") or []
+        text = " ".join([str(cov.get("metric") or ""), *(str(n) for n in notes)])
+        match = _HEDGE_RE.search(text)
+        if match:
+            start = max(0, match.start() - 60)
+            found[key] = text[start : match.end() + 90].strip()
+    return found
+
+
 def validate_spec(spec: dict) -> dict[str, list[str]]:
     """covenant_key -> list of variable names that resolve to nothing (neither a role, a
     built-in tag aggregate, nor a doc_figures entry). Non-empty means: don't trust that

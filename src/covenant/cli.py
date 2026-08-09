@@ -43,7 +43,13 @@ from covenant.analyze.clauses import (
 from covenant.analyze.documents_index import DocumentIndex
 from covenant.analyze.enrich import enrich_scenario, load_enriched, save_enriched
 from covenant.analyze.review import apply_correction, build_worksheet, review_cell
-from covenant.analyze.spec import build_spec_voted, load_spec, save_spec, validate_spec
+from covenant.analyze.spec import (
+    build_spec_voted,
+    load_spec,
+    save_spec,
+    self_reported_approximations,
+    validate_spec,
+)
 from covenant.config import Paths, resolve
 from covenant.ingest.documents import concurrency, extract_documents
 from covenant.ingest.ledger import load_ledger
@@ -598,6 +604,10 @@ def cmd_doctor(args, paths: Paths) -> None:
             spec_problems = validate_spec(spec)
             if spec_problems:
                 notes.append(f"unresolvable formula variables: {spec_problems}")
+            # The model's own words about its own formula. Every spec defect found by hand was
+            # confessed here first, in a field nothing else reads.
+            for key, admission in self_reported_approximations(spec).items():
+                notes.append(f"{key}: the spec calls its own formula approximate -- {admission}")
             for key in keys:
                 cov = spec.get("covenants", {}).get(key)
                 if cov is None:
