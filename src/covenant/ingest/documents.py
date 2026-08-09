@@ -44,8 +44,15 @@ def _ocr_page(page: pdfium.PdfPage) -> str:
 def _extract_one(path: Path, cache_dir: Path) -> Doc:
     cache_path = _cache_path(path, cache_dir)
     if cache_path.exists():
-        cached = json.loads(cache_path.read_text())
-        return Doc(doc_id=path.stem, text=cached["text"], method=cached["method"])
+        try:
+            cached = json.loads(cache_path.read_text())
+            return Doc(doc_id=path.stem, text=cached["text"], method=cached["method"])
+        except (json.JSONDecodeError, KeyError, UnicodeDecodeError):
+            # An unreadable entry is a cache miss, not a failure. A run killed mid-write leaves a
+            # truncated file behind, and treating that as fatal turned one interrupted extraction
+            # into every later run crashing with "Expecting value: line 1 column 1" -- an error
+            # naming neither the document nor the cache. Re-extracting costs one document.
+            print(f"  cached text for {path.name} unreadable, re-extracting", flush=True)
 
     pdf = pdfium.PdfDocument(str(path))
     parts: list[str] = []
@@ -63,7 +70,16 @@ def _extract_one(path: Path, cache_dir: Path) -> Doc:
     method = "raw+ocr" if ocr_used else "raw"
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps({"text": text, "method": method}, ensure_ascii=False))
+    # Write to a temporary file and rename: on POSIX the rename is atomic, so a reader either sees
+    # the previous state or the complete new one, and a process killed mid-write leaves the
+    # temporary behind rather than a half-written cache entry.
+    payload = json.dumps({"text": text, "method": method}, ensure_ascii=False)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=cache_dir, prefix=cache_path.stem, suffix=".part", delete=False
+    ) as handle:
+        handle.write(payload)
+        partial = Path(handle.name)
+    partial.replace(cache_path)
     return Doc(doc_id=path.stem, text=text, method=method)
 
 
