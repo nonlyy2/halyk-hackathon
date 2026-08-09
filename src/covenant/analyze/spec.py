@@ -81,6 +81,12 @@ description of what it sums or represents. This is documentation only, NOT a pla
 new name -- every name here must ALSO be a role (a "roles" value), one of the two built-in tag \
 aggregates, or a doc_figures key. Never invent a composite/derived name here (e.g. "ebitda", \
 "total_expenses", "net_income") that doesn't independently resolve to one of those three things.
+State the term's SCOPE -- what kind of thing it is and how widely it reaches ("the Borrower's total \
+capital expenditure for the period", "the Borrower's own sales revenue"). Never enumerate WHICH \
+items compose it: "sum of operating costs and management advisory retainers" asserts a composition \
+the clause did not state, and downstream stages read this description as if the clause had. If the \
+clause itself lists what the term comprises, that list already lives in the clause text and does \
+not need repeating here.
   - "formula": a plain arithmetic expression (+, -, *, /, min(...), max(...), parentheses only -- \
 no other functions) using ONLY role names, the two built-in tag aggregates, and/or doc_figures \
 names -- the same restriction as "variables" above. If the clause's metric is a composite like \

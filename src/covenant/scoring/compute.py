@@ -11,6 +11,7 @@ eval on unchecked model output), compares to the threshold, and derives `actual`
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass, replace
 
 from covenant.analyze.binding import is_a_line_item
@@ -507,6 +508,11 @@ def _safe_evidence(
 
 
 ABSURD_COST_MULTIPLE = 2.0
+# What a cost role is called is the model's choice, and it varies: matching the literal suffix
+# "_expenses" left this rescue unable to fire on "interest_expense", "operating_costs" or "opex" --
+# names the spec prompt's own examples use. The role's naming should not decide whether an absurd
+# total gets caught.
+_COST_ROLE_RE = re.compile(r"_(?:expenses?|costs?)$", re.IGNORECASE)
 
 
 def narrow_absurd_cost_roles(
@@ -538,12 +544,14 @@ def narrow_absurd_cost_roles(
     for role, total in totals.items():
         if (
             role in bound_terms
-            or not role.endswith("_expenses")
+            or not _COST_ROLE_RE.search(role)
             or not revenue
             or abs(total) <= ABSURD_COST_MULTIPLE * revenue
         ):
             continue
-        term = role.rsplit("_", 1)[0]  # "operating_expenses" -> "operating"
+        term = _COST_ROLE_RE.sub("", role).strip("_")  # "operating_expenses" -> "operating"
+        if not term:
+            continue
         named = {
             e.category
             for e in enriched
@@ -557,9 +565,62 @@ def narrow_absurd_cost_roles(
     return adjusted
 
 
+def _names_under(node: ast.AST) -> set[str]:
+    call_func_ids = {id(n.func) for n in ast.walk(node) if isinstance(n, ast.Call)}
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and id(n) not in call_func_ids}
+
+
+def _division_pairs(expr: str) -> list[tuple[set[str], set[str]]]:
+    """(numerator names, denominator names) for every division in the expression."""
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return []
+    return [
+        (_names_under(node.left), _names_under(node.right))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+    ]
+
+
+def without_collapsed_ratios(
+    cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None
+) -> dict | None:
+    """Drop a bound denominator that resolves to exactly the rows of what it divides.
+
+    A clause caps one quantity as a fraction of a wider one -- transfers to unrestricted
+    subsidiaries against total capital expenditure, related-party payments against total operating
+    expenses -- and the qualifier that narrows the numerator governs the numerator alone. A binder
+    that applies the clause's headline qualifier to every term it names selects the same rows twice,
+    and the metric is then 1.0 by construction: not a measurement, an artifact. Neither the value
+    nor the verdict survives it, so the term falls back to the role map, which is where it would
+    have been without this stage.
+
+    Deterministic and model-independent: a ratio of a quantity to itself is never a covenant test,
+    whatever produced it.
+    """
+    if not binding:
+        return binding
+    cleaned = dict(binding)
+    for numerator, denominator in _division_pairs(_metric_expr(cov)):
+        numerator_rows: set[str] = set()
+        for name in numerator:
+            numerator_rows |= {
+                e.txn_id for e in variable_rows(name, cov, roles, enriched, cleaned)[1]
+            }
+        for name in denominator:
+            if bound_ids(cleaned, name) is None:
+                continue
+            rows = {e.txn_id for e in variable_rows(name, cov, roles, enriched, cleaned)[1]}
+            if rows and rows == numerator_rows:
+                cleaned.pop(name)
+    return cleaned
+
+
 def compute_covenant(
     cov: dict, roles: dict, enriched: list[EnrichedTxn], binding: dict | None = None
 ) -> ComputeResult:
+    binding = without_collapsed_ratios(cov, roles, enriched, binding)
     # `actual` is always the TRUE metric value even where a carve-out or an untriggered springing
     # test permits it to sit beyond the limit (CASE.ru.md) -- _evaluate keeps the two apart.
     value, status = _evaluate(cov, roles, enriched, binding)
