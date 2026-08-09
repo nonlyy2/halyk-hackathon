@@ -6,14 +6,47 @@ import time
 from dataclasses import dataclass
 
 import httpx
-from dotenv import load_dotenv
+from dotenv import dotenv_values, find_dotenv, load_dotenv
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-HF_TOKEN = os.environ.get("HF_TOKEN")
-ALIBABA_CLOUD_API_KEY = os.environ.get("ALIBABA_CLOUD_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+_ENV_PATH = find_dotenv(usecwd=True)
+_key_lock = threading.Lock()
+_last_seen_key: dict[str, str] = {}
+
+
+def api_key(*names: str) -> str | None:
+    """The credential as it stands RIGHT NOW, re-read from .env on every call.
+
+    A free-tier key is spent in a few hundred requests and then replaced, and a run outlives
+    several of them. Reading the value once at import meant a key swapped into .env changed
+    nothing until the process restarted -- and restarting mid-stage throws away whatever was in
+    flight and re-spends the calls that produced it.
+
+    The file wins over the process environment, because editing .env is how a key gets replaced.
+    Re-reading costs one small file read per request, against a hundred-odd requests a run.
+    """
+    from_file = dotenv_values(_ENV_PATH) if _ENV_PATH else {}
+    for name in names:
+        value = from_file.get(name) or os.environ.get(name)
+        if not value:
+            continue
+        with _key_lock:
+            changed = _last_seen_key.get(name) not in (None, value)
+            _last_seen_key[name] = value
+        if changed:
+            # A new key carries its own untouched allowance, so everything learned about which
+            # models were spent applied to the old one and must not be held against this one.
+            with _exhausted_lock:
+                _exhausted.clear()
+            print(f"  {name} changed -- exhausted-quota state cleared", flush=True)
+        return value
+    return None
+
+
+def gemini_key() -> str | None:
+    return api_key("GEMINI_API_KEY", "GOOGLE_API_KEY")
+
 
 HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 # A dedicated Alibaba workspace gets its own host, so the endpoint has to be configurable rather
@@ -102,13 +135,13 @@ def _select_backend() -> str:
     forced = os.environ.get("COVENANT_BACKEND")
     if forced:
         return forced
-    if ANTHROPIC_API_KEY:
+    if api_key("ANTHROPIC_API_KEY"):
         return "anthropic"
-    if GEMINI_API_KEY:
+    if gemini_key():
         return "gemini"
-    if HF_TOKEN:
+    if api_key("HF_TOKEN"):
         return "huggingface"
-    if ALIBABA_CLOUD_API_KEY:
+    if api_key("ALIBABA_CLOUD_API_KEY"):
         return "alibaba"
     return "ollama"
 
@@ -175,7 +208,7 @@ class Client:
                 if self.backend == "huggingface":
                     return self._complete_openai_compatible(
                         self._base_url(HF_ROUTER_BASE_URL),
-                        HF_TOKEN,
+                        api_key("HF_TOKEN"),
                         serving,
                         system,
                         user,
@@ -186,7 +219,7 @@ class Client:
                 if self.backend == "gemini":
                     return self._complete_openai_compatible(
                         self._base_url(GEMINI_BASE_URL),
-                        GEMINI_API_KEY,
+                        gemini_key(),
                         serving,
                         system,
                         user,
@@ -196,7 +229,7 @@ class Client:
                 if self.backend == "alibaba":
                     return self._complete_openai_compatible(
                         self._base_url(DASHSCOPE_BASE_URL),
-                        ALIBABA_CLOUD_API_KEY,
+                        api_key("ALIBABA_CLOUD_API_KEY"),
                         serving,
                         system,
                         user,
@@ -280,7 +313,7 @@ class Client:
     ) -> str:
         import anthropic
 
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = anthropic.Anthropic(api_key=api_key("ANTHROPIC_API_KEY"))
         response = client.messages.create(
             model=model,
             max_tokens=max_tokens,

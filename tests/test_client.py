@@ -54,6 +54,46 @@ def test_a_per_minute_refusal_is_not_remembered():
     assert "a" not in client_module._exhausted
 
 
+def test_a_key_swapped_into_the_env_file_is_picked_up_without_a_restart(tmp_path, monkeypatch):
+    _clear()
+    env = tmp_path / ".env"
+    env.write_text("GEMINI_API_KEY=first\n")
+    monkeypatch.setattr(client_module, "_ENV_PATH", str(env))
+    monkeypatch.setattr(client_module, "_last_seen_key", {})
+    assert client_module.gemini_key() == "first"
+
+    # the key burns out and is replaced while the process keeps running
+    env.write_text("GEMINI_API_KEY=second\n")
+    assert client_module.gemini_key() == "second"
+
+
+def test_swapping_the_key_clears_what_was_learned_about_the_old_one(tmp_path, monkeypatch):
+    _clear()
+    env = tmp_path / ".env"
+    env.write_text("GEMINI_API_KEY=first\n")
+    monkeypatch.setattr(client_module, "_ENV_PATH", str(env))
+    monkeypatch.setattr(client_module, "_last_seen_key", {})
+    client_module.gemini_key()
+    client_module._exhausted["gemini-3.1-flash-lite"] = client_module.time.monotonic()
+
+    env.write_text("GEMINI_API_KEY=second\n")
+    client_module.gemini_key()
+    # the new key has its own untouched allowance; the old key's exhaustion says nothing about it
+    assert client_module._exhausted == {}
+
+
+def test_reading_the_same_key_twice_does_not_clear_anything(tmp_path, monkeypatch):
+    _clear()
+    env = tmp_path / ".env"
+    env.write_text("GEMINI_API_KEY=same\n")
+    monkeypatch.setattr(client_module, "_ENV_PATH", str(env))
+    monkeypatch.setattr(client_module, "_last_seen_key", {})
+    client_module.gemini_key()
+    client_module._exhausted["m"] = client_module.time.monotonic()
+    client_module.gemini_key()
+    assert "m" in client_module._exhausted
+
+
 def test_a_daily_refusal_is_remembered():
     _clear()
 
