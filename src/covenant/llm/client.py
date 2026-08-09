@@ -30,10 +30,12 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 # them, so choosing a model never means editing this file. The pairs below are what each provider
 # should be run with absent a reason to differ; see .env.example for the alternatives.
 _MODEL_BY_BACKEND_AND_SIZE = {
-    # Flash both ways on purpose: every Gemini Pro model reports `limit: 0` on the free tier,
-    # so the choice is between Flash generations, not between Flash and Pro.
-    ("gemini", "small"): "gemini-2.5-flash",
-    ("gemini", "complex"): "gemini-3.5-flash",
+    # Flash-lite both ways on purpose. Every Gemini Pro model reports `limit: 0` on the free tier,
+    # so the choice is only between Flash generations -- and of those, measured rather than
+    # documented, gemini-3.1-flash-lite allows 500 requests a day while the rest allow 20. A run
+    # makes on the order of a hundred calls, so anything metered at 20 cannot carry a single stage.
+    ("gemini", "small"): "gemini-3.1-flash-lite",
+    ("gemini", "complex"): "gemini-3.1-flash-lite",
     ("anthropic", "small"): "claude-haiku-4-5-20251001",
     ("anthropic", "complex"): "claude-sonnet-5",
     ("huggingface", "small"): "Qwen/Qwen3-8B:nscale",
