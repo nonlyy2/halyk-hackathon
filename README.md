@@ -93,6 +93,15 @@ It is the list to spend the end of a timed run on.
 submittable file, and writes a per-cell worksheet to `<data>/.cache/worksheets.json` — which
 transactions fed which term — which is what to read when a cell looks wrong.
 
+### `--review` is off by default, and should stay off on a small model
+
+The critic pass is opt-in because, measured, it made things markedly worse on `gemini-3.1-flash-lite`:
+**33.0 → 25.4 / 36**. It changed 14 of the 36 cells and most of those had been correct — asked
+"is anything wrong here", a small model finds something. The guardrails held (every correction was
+recomputed, none set a status or a number directly), so nothing became invalid; the selections were
+just worse. Re-measure it before enabling it on any new model, and only keep it if the score moves
+the right way.
+
 Each stage caches under `<data>/.cache/`, so reruns are cheap and every intermediate is
 inspectable. Spec caches are tagged with the model that produced them, so switching models writes
 separate files instead of silently reusing another model's judgement.
