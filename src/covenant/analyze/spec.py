@@ -260,18 +260,36 @@ def _repair_spec(
     verdict back and resampling is far cheaper than losing the cell, and it only ever replaces a
     covenant whose variables now all resolve, so a repair can never make a spec less computable."""
     problems = validate_spec(spec)
-    if not problems:
+    # A clause granting a permitted basket states two numbers, and the basket belongs inside the
+    # metric rather than beside it. Two of three models drop it every time, and the resulting cell
+    # compares a raw total to a limit it was never meant to be compared to.
+    spec.setdefault("clauses", clauses)
+    baskets = basket_not_subtracted(spec)
+    if not problems and not baskets:
         return spec
 
-    correction = (
-        "\n\nYour previous answer is REJECTED for these covenants: "
-        + json.dumps(problems, ensure_ascii=False)
-        + '. Each listed name resolves to nothing: it is not a role you assigned in "roles", not '
-        'one of the built-in tag aggregates, and not a key of that covenant\'s "doc_figures". '
-        "Rewrite those formulas using ONLY names that are. A composite such as EBITDA must be "
-        'spelled out from primitive roles (e.g. "revenue - operating_expenses"), never referenced '
-        "by its name. Return the complete corrected JSON object."
-    )
+    correction = "\n\nYour previous answer is REJECTED."
+    if problems:
+        correction += (
+            " These covenants reference names that resolve to nothing: "
+            + json.dumps(problems, ensure_ascii=False)
+            + '. A listed name is not a role you assigned in "roles", not one of the built-in tag '
+            'aggregates, and not a key of that covenant\'s "doc_figures". Rewrite those formulas '
+            "using ONLY names that are. A composite such as EBITDA must be spelled out from "
+            'primitive roles (e.g. "revenue - operating_expenses"), never referenced by its name.'
+        )
+    if baskets:
+        correction += (
+            f" These covenants {json.dumps(baskets)} have a clause that permits a BASKET -- it caps "
+            "a total 'after excluding a permitted basket of up to $Y of such payments properly "
+            "classified as <some category>'. Such a clause states two numbers and only the first is "
+            "the threshold. The basket is part of WHAT IS MEASURED, not an allowance on the limit "
+            "and not a carve-out on the status: the metric is the total LESS the basket, so the "
+            'formula must subtract it, capped at the stated amount -- "<total> - min(<the excluded '
+            "category's role>, Y)\". Comparing the raw total to the threshold reports a breach for "
+            "a borrower that is inside its cap."
+        )
+    correction += " Return the complete corrected JSON object."
     try:
         repaired = build_spec(
             clauses,
@@ -286,9 +304,13 @@ def _repair_spec(
     except Exception:  # noqa: BLE001 -- a failed repair just leaves the original spec in place
         return spec
 
+    repaired.setdefault("clauses", clauses)
     fixed = validate_spec(repaired)
+    still_basket = set(basket_not_subtracted(repaired))
     for key, cov in repaired.get("covenants", {}).items():
-        if key in problems and key not in fixed:
+        resolved = key in problems and key not in fixed
+        subtracts = key in baskets and key not in still_basket
+        if resolved or subtracts:
             spec.setdefault("covenants", {})[key] = cov
     return spec
 
@@ -413,6 +435,42 @@ def self_reported_approximations(spec: dict) -> dict[str, str]:
     return found
 
 
+# A clause that caps a total "after excluding a permitted basket of up to $Y of such payments
+# properly classified as X" states TWO numbers, and only one of them is the limit. The metric is
+# the total less the basket; the basket is not an allowance on the threshold and not a carve-out on
+# the status -- it is part of what is measured, so it belongs in the formula.
+#
+# Getting this wrong is silent and expensive: the raw total is compared to the limit and a borrower
+# comfortably inside its cap reads as a breach. Two of three models drop the basket on every clause
+# of this shape, and no clause of this shape exists in the public set at all, so nothing else in
+# the pipeline would ever have caught it.
+_BASKET_RE = re.compile(
+    r"разрешённ\w*\s+корзин|permitted basket|после исключения\s+разрешённ", re.IGNORECASE
+)
+
+
+def basket_not_subtracted(spec: dict) -> list[str]:
+    """Covenant keys whose clause grants a permitted basket the formula never subtracts."""
+    flagged = []
+    for key, cov in (spec.get("covenants") or {}).items():
+        if not isinstance(cov, dict):
+            continue
+        clause = (spec.get("clauses") or {}).get(key, "")
+        if not _BASKET_RE.search(clause):
+            continue
+        formula = cov.get("formula") or ""
+        try:
+            has_subtraction = any(
+                isinstance(n, ast.BinOp) and isinstance(n.op, ast.Sub)
+                for n in ast.walk(ast.parse(formula, mode="eval"))
+            )
+        except (SyntaxError, ValueError):
+            has_subtraction = False
+        if not has_subtraction:
+            flagged.append(key)
+    return sorted(flagged)
+
+
 def validate_spec(spec: dict) -> dict[str, list[str]]:
     """covenant_key -> list of variable names that resolve to nothing (neither a role, a
     built-in tag aggregate, nor a doc_figures entry). Non-empty means: don't trust that
@@ -534,6 +592,48 @@ def _coerce_numbers(spec: dict) -> dict:
     return spec
 
 
+def _drop_double_counted_carve_outs(spec: dict) -> dict:
+    """Remove a carve-out that excludes what the formula already subtracts.
+
+    A clause granting a permitted basket -- "after excluding a permitted basket of up to $Y of such
+    payments classified as X" -- is expressed once, in the formula, as `total - min(X, Y)`. A model
+    that also records it as {"kind": "exclusion", "excluded_role": X} applies it twice, and the
+    second application is worse than the first: _apply_carve_out strips EVERY row of that role for
+    the status test, uncapped, so the borrower gets an unlimited basket instead of the stated one.
+    The reported `actual` stays right while the verdict silently flips.
+
+    Detected structurally, not by wording: the excluded role must appear inside a min() call in the
+    same formula. Across every cached spec of both datasets and every model this fires exactly once,
+    so it removes a real double-count without touching a genuine exclusion.
+    """
+    for cov in (spec.get("covenants") or {}).values():
+        if not isinstance(cov, dict):
+            continue
+        carve = cov.get("carve_out")
+        if not isinstance(carve, dict) or carve.get("kind") != "exclusion":
+            continue
+        excluded = carve.get("excluded_role")
+        formula = cov.get("formula") or ""
+        if not excluded:
+            continue
+        try:
+            tree = ast.parse(formula, mode="eval")
+        except (SyntaxError, ValueError):
+            continue
+        capped = {
+            n.id
+            for call in ast.walk(tree)
+            if isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "min"
+            for n in ast.walk(call)
+            if isinstance(n, ast.Name)
+        }
+        if excluded in capped:
+            cov["carve_out"] = None
+    return spec
+
+
 RESERVED_AGGREGATES = ("related_party_payments", "unrestricted_sub_transfers")
 
 
@@ -555,8 +655,10 @@ def load_spec(sid: str, client: Client, cache_dir: Path = CACHE_DIR) -> dict | N
     path = cache_dir / f"{sid}__{_model_tag(client)}.json"
     if not path.exists():
         return None
-    return _unshadow_reserved_roles(
-        _split_inflows_from_expense_roles(
-            _sanitise_identifiers(_coerce_numbers(json.loads(path.read_text())))
+    return _drop_double_counted_carve_outs(
+        _unshadow_reserved_roles(
+            _split_inflows_from_expense_roles(
+                _sanitise_identifiers(_coerce_numbers(json.loads(path.read_text())))
+            )
         )
     )
