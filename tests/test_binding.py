@@ -6,8 +6,24 @@ from covenant.analyze.binding import (
     _aggregate_bindings,
     _sanitise,
     bindable_terms,
+    is_a_line_item,
     mask_threshold,
 )
+
+
+def test_a_handful_of_rows_is_a_line_item():
+    assert is_a_line_item(3, 57)
+    assert is_a_line_item(28, 57)
+
+
+def test_most_of_the_ledger_is_not_a_line_item():
+    assert not is_a_line_item(53, 57)
+    assert not is_a_line_item(45, 56)
+
+
+def test_a_tiny_ledger_is_never_judged_by_share():
+    # with five rows in total, a term holding four of them may well be the honest answer
+    assert is_a_line_item(4, 5)
 
 
 def test_bindable_terms_excludes_tag_aggregates_and_doc_figures():

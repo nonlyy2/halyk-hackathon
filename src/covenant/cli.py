@@ -24,7 +24,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from covenant.analyze.binding import bind_terms_voted, bindable_terms, load_binding, save_binding
+from covenant.analyze.binding import (
+    bind_terms_voted,
+    bindable_terms,
+    is_a_line_item,
+    load_binding,
+    save_binding,
+)
 from covenant.analyze.classify import _detected_markers, classify_document
 from covenant.analyze.clauses import (
     extract_clause_text,
@@ -321,6 +327,24 @@ def cmd_spec(args, paths: Paths) -> None:
     _in_parallel(_scenarios(paths, args.scenarios), one)
 
 
+def _spec_clauses(paths: Paths, docs: dict, index: DocumentIndex, spec: dict, sid: str) -> dict:
+    """The clause text this scenario's covenants were written from.
+
+    Normally the spec cache carries it. A spec cached before it did gets the clauses re-sliced here,
+    deterministically and without a call -- binding and reviewing against a one-line "metric"
+    summary instead of the clause's own wording gives up most of what those stages are for.
+    """
+    clauses = spec.get("clauses") or {}
+    if clauses:
+        return clauses
+    keys = sorted(spec.get("covenants") or {}) or _template_keys(paths, sid)
+    article = sorted({k.split(".")[0] for k in keys} or {"6"})[0]
+    text = _agreement_text(docs, index, sid, article)
+    if text is None:
+        return {}
+    return _clause_texts(text, keys)[0]
+
+
 def cmd_bind(args, paths: Paths) -> None:
     docs = _docs(paths)
     index = DocumentIndex.load(paths.classifications)
@@ -336,19 +360,9 @@ def cmd_bind(args, paths: Paths) -> None:
         if spec is None or loaded is None:
             _say(f"{sid}: ERROR needs both a spec and an enriched cache")
             return
-        # A spec cached before this stage existed carries no clause text, and binding on a one-line
-        # "metric" summary instead of the clause's own wording is most of what this stage is for --
-        # so re-slice it, deterministically and without a call.
-        clauses = spec.get("clauses") or {}
-        if not clauses:
-            keys = sorted(spec.get("covenants") or {}) or _template_keys(paths, sid)
-            article = sorted({k.split(".")[0] for k in keys} or {"6"})[0]
-            text = _agreement_text(docs, index, sid, article)
-            if text is not None:
-                clauses, _missing = _clause_texts(text, keys)
         binding = bind_terms_voted(
             spec,
-            clauses,
+            _spec_clauses(paths, docs, index, spec, sid),
             loaded[0],
             client,
             votes=args.votes,
@@ -425,7 +439,16 @@ def cmd_build(args, paths: Paths) -> None:
         loaded = load_enriched(sid, str(paths.enriched))
         bindings = load_binding(sid, client, paths.bindings) or {}
         clauses = (spec or {}).get("clauses") or {}
-        bound_terms = {t for terms in bindings.values() for t in terms}
+        # Only terms the binding actually resolves count as bound. A selection the line-item guard
+        # rejects falls back to the role map, and that role then still needs narrowing -- treating
+        # it as bound leaves the wide reading in place with nothing left to correct it.
+        ledger_size = len(loaded[0]) if loaded else 0
+        bound_terms = {
+            term
+            for terms in bindings.values()
+            for term, entry in terms.items()
+            if entry.get("txn_ids") and is_a_line_item(len(entry["txn_ids"]), ledger_size)
+        }
         roles = (
             narrow_absurd_cost_roles(spec["roles"], loaded[0], bound_terms)
             if spec and loaded

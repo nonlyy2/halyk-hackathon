@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, replace
 
+from covenant.analyze.binding import is_a_line_item
 from covenant.analyze.enrich import EnrichedTxn
 
 _ALLOWED_NODES = (
@@ -160,7 +161,7 @@ def variable_rows(
     # business, not the selector's. A binding whose rows all fall outside the period, or which named
     # no rows at all, falls through to the role path rather than asserting a zero.
     ids = bound_ids(binding, name)
-    if ids is not None:
+    if ids is not None and is_a_line_item(len(ids), len(enriched)):
         selected = [e for e in filtered if e.txn_id in set(ids)]
         if selected:
             return "bound", selected
@@ -257,6 +258,10 @@ def _evaluate(
         return value, "COMPLIANT"  # springing covenant not triggered
 
     status_value, effective_threshold = _apply_carve_out(cov, roles, enriched, value, binding)
+    # Compared UNROUNDED, deliberately. Testing the value as reported to two decimals looks more
+    # coherent -- it stops a cell reading "actual 0.04, limit 0.04, status BREACH" -- but the key
+    # does not work that way: this set contains two cells that both report 0.04 against a 0.04
+    # limit, one COMPLIANT and one BREACH. Only the unrounded value tells them apart.
     ok = _COMPARISONS[cov["comparison"]](status_value, effective_threshold)
     return value, "COMPLIANT" if ok else "BREACH"
 

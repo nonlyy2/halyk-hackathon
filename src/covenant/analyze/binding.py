@@ -91,6 +91,10 @@ CACHE_DIR = Path(".cache/bindings")
 
 # Below this share of the samples, a txn_id is not carried into the voted binding.
 _VOTE_SHARE = 0.5
+# Above this share of the borrower's whole ledger, a "term" is not a line item -- see _too_broad.
+_MAX_TERM_SHARE = 0.5
+# ...but only once the ledger is big enough for the share to mean anything.
+_MIN_LEDGER_FOR_SHARE = 10
 
 
 def bindable_terms(cov: dict) -> list[str]:
@@ -198,6 +202,24 @@ def bind_terms(
         temperature=temperature,
     )
     return _sanitise(data, payload, {e.txn_id for e in enriched})
+
+
+def is_a_line_item(selected: int, ledger_size: int) -> bool:
+    """Is this selection still a line item, or has it become the whole ledger?
+
+    A covenant term names one line of the borrower's accounts, and every term these clauses use
+    resolves to a handful of rows. A selection covering most of the ledger is not a generous
+    reading of the clause -- it is the failure this stage exists to prevent, arrived at from the
+    other side: the model fell back on "every cost is an operating expense" despite being told not
+    to, and the metric is then wrong by an order of magnitude in the opposite direction.
+
+    Counted in rows rather than dollars, so one large transaction cannot sway it, and only applied
+    to a ledger big enough for a share to mean anything. Checked where the binding is USED rather
+    than where it is produced, so it also covers a binding already sitting in the cache.
+    """
+    if ledger_size < _MIN_LEDGER_FOR_SHARE:
+        return True
+    return selected <= _MAX_TERM_SHARE * ledger_size
 
 
 def _sanitise(data: dict, payload: dict, known_ids: set[str]) -> dict[str, dict[str, dict]]:
